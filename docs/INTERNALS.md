@@ -51,8 +51,16 @@ automatically executes a specialist's scripts.
   The repair flow retains review evidence and requires a fresh exact publication plan.
 - All branch updates use one atomic push with exact remote leases. A server that
   does not support atomic push fails; there is no unsafe sequential fallback.
-- A moved root base blocks publication at preflight. The base itself is not
-  pushed, so a base update after preflight can still race with publication.
+- Default runs retain the root PR's existing base point, so a moving staging/main
+  does not invalidate publication or repair. `restack_base=latest` opts into rebasing
+  onto the base tip frozen at start and blocks if it moves before push preflight.
+  The base itself is not pushed or leased, so latest mode cannot exclude a later race.
+- Run clones copy effective user.name/user.email from the source checkout. Fixes
+  and replayed committers use that identity. Push rejects synthetic
+  stack-review@localhost authors or committers in the proposed PR commit ranges.
+- Ownership failures identify the fix commit and original file/line. After amending
+  a fix hunk, `record-fix --remap OLD_SHA=NEW_SHA` updates its verdict only after
+  validation, retaining the previous verdict file. Never edit run.json to recover.
 - Body updates happen after branch publication. Progress is journaled, so a retry
   can finish a partial publication. External body edits are checked beforehand,
   but GitHub has no conditional PR-body write: concurrent edits can still race
@@ -102,7 +110,7 @@ stay outside it. To build a source zip containing only explicitly allowlisted fi
 python3 package.py
 ```
 
-Share `dist/stack-review-0.4.0.zip`; recipients unpack it and run install.py. The
+Share `dist/stack-review-0.4.1.zip`; recipients unpack it and run install.py. The
 archive includes the tests, both adapters, logo and guides, with no installed dependencies.
 The distribution builder only creates a local archive; it does not publish the
 repository, upload a release or change live agent configuration. Project settings,

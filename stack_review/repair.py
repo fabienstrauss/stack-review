@@ -30,7 +30,8 @@ def begin(run, number, reason, include_unselected=False):
     refs = [run.state["prs"][0]["base"]] + [q["head"] for q in run.state["prs"]]
     observed = {ref: sha for sha, ref in (line.split("\t") for line in
                 git(run.repo, "ls-remote", run.state["remote"], *[f"refs/heads/{b}" for b in refs]).splitlines())}
-    if observed.get(f"refs/heads/{refs[0]}") != run.state["base_sha"]:
+    if (run.cfg.get("restack_base", "latest") == "latest" and
+            observed.get(f"refs/heads/{refs[0]}") != run.state["base_sha"]):
         raise Error("Root base moved; a fresh run must review the changed integration context")
     published = run.state.get("pushed", False)
     for q in run.state["prs"]:
@@ -103,10 +104,14 @@ def record(run):
         for filename in filter(None, git(worktree, "diff-tree", "--no-commit-id", "--name-only", "-z", "-r", commit, raw=True).split("\0")):
             if any(fnmatch.fnmatchcase(filename, pat) for pat in run.cfg["forbidden_paths"]):
                 raise Error(f"Repair changes forbidden path: {filename}")
-        audit.extend(ownership_audit(worktree, run.state["base_sha"], f"{commit}^", commit))
+        audit.extend({**item, "fix_commit": commit} for item in
+                     ownership_audit(worktree, run.state["base_sha"], f"{commit}^", commit))
     atomic_json(directory / "ownership.json", audit)
     if audit and run.cfg["ownership_policy"] == "stack":
-        raise Error("Repair changes base-owned lines; report the required scope decision")
+        locations = "; ".join(f"{a['fix_commit']} {a['file']}:{a['line']}" for a in audit[:10])
+        raise Error(f"Repair changes base-owned lines: {locations}; inspect {directory / 'ownership.json'}. "
+                    "Correct the out-of-scope hunk in the repair worktree and update changes.json, "
+                    "or report the required scope decision")
     repair.update(stage="review", head=head, commits=commits, changes=changes, ownership_audit=audit)
     (directory / "repair.patch").write_text(git(worktree, "diff", repair["start"], head) + "\n")
     (directory / "review-brief.md").write_text(f"""# Independently review repair of PR #{p['number']}

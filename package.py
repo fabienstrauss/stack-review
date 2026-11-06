@@ -38,6 +38,6 @@ def build(output):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--output", type=Path, default=Path("dist/stack-review-0.4.0.zip"))
+    parser.add_argument("--output", type=Path, default=Path("dist/stack-review-0.4.1.zip"))
     args = parser.parse_args()
     print(build(args.output))

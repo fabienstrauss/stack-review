@@ -66,6 +66,7 @@ def parser():
             p.add_argument("--ci-timeout", type=int)
             p.add_argument("--expected-check", action="append")
             p.add_argument("--repair-limit", type=int)
+            p.add_argument("--restack-base", choices=("existing", "latest"))
     repairs = sp.add_parser("repair", help="Repair verification/CI failures without repeating completed reviews")
     rs = repairs.add_subparsers(dest="repair_action", required=True)
     for name in ("begin", "record", "record-review", "restack", "cancel"):
@@ -125,6 +126,8 @@ def parser():
             p.add_argument("--pr", required=True, type=int)
         if name == "restack":
             p.add_argument("--continue", dest="resume", action="store_true")
+        if name == "record-fix":
+            p.add_argument("--remap", action="append", help="Remap a stale FIX verdict after amending: OLD_SHA=NEW_SHA")
         if name == "verify":
             p.add_argument("--skip-reason")
         if name == "approve":
@@ -140,7 +143,8 @@ def dispatch(a):
         if a.project_action == "inspect":
             return onboarding.inspect(a.home, a.checkout)
         return onboarding.configure(a.home, a.checkout, a.repository, a.remote, a.check, a.setup, a.context, a.replace,
-                                    a.skill, a.require_skill, a.ci_enabled, a.ci_interval, a.ci_timeout, a.expected_check, a.repair_limit)
+                                    a.skill, a.require_skill, a.ci_enabled, a.ci_interval, a.ci_timeout, a.expected_check, a.repair_limit,
+                                    a.restack_base)
     if a.command == "ci" and a.ci_action == "find":
         from .ci import find
         return find(a.home, a.checkout, a.pr)
@@ -232,7 +236,7 @@ def dispatch(a):
         if a.command == "prepare-fix":
             return {"brief": run.prepare(a.pr)}
         if a.command == "record-fix":
-            return run.record_fix(a.pr)
+            return run.record_fix(a.pr, a.remap)
         if a.command == "restack":
             return run.restack(a.resume)
         if a.command == "verify":

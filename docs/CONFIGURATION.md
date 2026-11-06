@@ -68,6 +68,7 @@ existing configuration while retaining preferences not overridden.
 it mandatory. These replace the saved specialist list when explicitly supplied.
 `--ci`/`--no-ci`, `--ci-interval`, `--ci-timeout`, `--expected-check` and
 `--repair-limit` set CI and repair preferences without editing JSON.
+`--restack-base existing` (default) or `--restack-base latest` selects root integration policy.
 
 For custom or automated integrations, `init --settings <file> --checkout <path>
 --repository owner/repo` and `start --settings <file> --pr N` still work. The schema
@@ -85,6 +86,7 @@ uses Python tests; it is not a universal default.
 | `setup_commands` | Named argv arrays to prepare each private worktree (e.g. dependency installation) |
 | `command_timeout` | Timeout in seconds for each setup/check command |
 | `forbidden_paths` | Case-sensitive glob patterns blocked in every fix commit |
+| `restack_base` | `existing` (default) keeps the root PR's existing base point; `latest` rebases onto the base tip frozen at start and requires it to stay unchanged through push preflight |
 | `ownership_policy` | `stack` blocks edits to lines on the frozen root base; `report` exposes them in the plan |
 | `allow_skip_checks` | Permit explicit verification skips with a recorded reason; default false |
 | `agents` | Reviewer/fixer model and effort preferences, interpreted by the host adapter |
@@ -94,7 +96,9 @@ uses Python tests; it is not a universal default.
 
 Commands use argument arrays, never shell interpolation. `{worktree}` expands
 inside an argument; a standalone `{files}` expands to root-relative changed paths.
-Use `cwd: "."` with `{files}`. Put `--` before `{files}` where the target tool
+Paths come from each final PR's recorded base to its head, exclude deletions and
+missing files, and exclude unrelated base changes. File-scoped commands are skipped
+when this list is empty. Use `cwd: "."` with `{files}`. Put `--` before `{files}` where the target tool
 accepts it. Setup/check commands are trusted executable configuration: review
 settings before using someone else's file. No scripts are auto-discovered or run
 by project inspect/configure, init, list, status or doctor. Project rules still govern permitted commands.

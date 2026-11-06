@@ -173,7 +173,9 @@ class PipelineTests(unittest.TestCase):
         self.assertEqual(self.remote_head("part-1"), self.first)
         self.assertEqual(self.remote_head("part-2"), moved)
 
-    def test_changed_base_invalidates_frozen_context(self):
+    def test_changed_base_invalidates_frozen_context_in_latest_mode(self):
+        self.config_data["restack_base"] = "latest"
+        core.atomic_json(self.config, self.config_data)
         run = self.completed()
         plan = run.plan()
         run.approve(plan["digest"])
@@ -185,6 +187,119 @@ class PipelineTests(unittest.TestCase):
         with self.assertRaisesRegex(core.Error, "base moved"):
             run.push()
         self.assertEqual(self.remote_head("part-1"), self.first)
+
+    def advance_base(self):
+        self.g("switch", "main")
+        (self.source / "unrelated.txt").write_text("unrelated base update\n")
+        self.g("add", "unrelated.txt")
+        self.g("commit", "-m", "advance base")
+        self.g("push", "origin", "main")
+
+    def test_existing_base_keeps_root_history_and_publishes_after_base_moves(self):
+        self.advance_base()
+        run = self.completed(False)
+        self.assertEqual(run.entry(1)["new"], self.first)
+        self.assertEqual(run.entry(1)["new_base"], self.base)
+        self.assertFalse((run.worktree(run.entry(1)) / "unrelated.txt").exists())
+        plan = run.plan()
+        run.approve(plan["digest"])
+        self.advance_base_again()
+        run.push()
+        self.assertEqual(self.remote_head("part-1"), self.first)
+
+    def advance_base_again(self):
+        (self.source / "unrelated.txt").write_text("another base update\n")
+        self.g("add", "unrelated.txt")
+        self.g("commit", "-m", "advance base again")
+        self.g("push", "origin", "main")
+
+    def test_checks_use_restacked_pr_range_and_omit_deleted_files(self):
+        self.advance_base()
+        self.config_data["restack_base"] = "latest"
+        self.config_data["checks"] = [{"name": "paths", "argv": [sys.executable, "-c",
+                                    "import sys; print(sys.argv[1:])", "{files}"]}]
+        core.atomic_json(self.config, self.config_data)
+        run = self.start()
+        self.finding(run)
+        self.fix(run, filename="extra.txt", content="fix\n")
+        wt = run.worktree(run.entry(1))
+        core.git(wt, "rm", "one.txt")
+        core.git(wt, "commit", "--amend", "--no-edit")
+        new = core.git(wt, "rev-parse", "HEAD")
+        verdicts = run.pr_dir(run.entry(1)) / "verdicts.json"
+        value = core.read_json(verdicts)
+        value[0]["commit"] = new
+        core.atomic_json(verdicts, value)
+        run.record_fix(1)
+        self.no_findings(run, 2)
+        run.restack()
+        run.verify()
+        checks = run.state["verification"]["results"]
+        self.assertEqual(checks[0]["checks"][0]["argv"][3:], ["extra.txt"])
+        self.assertEqual(checks[1]["checks"][0]["argv"][3:], ["two.txt"])
+
+    def test_checkout_identity_used_for_fixes_and_replayed_committers(self):
+        run = self.completed()
+        for p in run.state["prs"]:
+            identities = core.git(run.repo, "log", "--format=%an <%ae>|%cn <%ce>",
+                                  f"{p['new_base']}..{p['new']}").splitlines()
+            self.assertTrue(identities)
+            self.assertTrue(all(line == "Test <test@example.invalid>|Test <test@example.invalid>" for line in identities))
+
+    def test_synthetic_identity_is_rejected_before_push(self):
+        run = self.start()
+        self.finding(run)
+        wt = run.worktree(run.entry(1))
+        core.git(wt, "config", "user.email", "stack-review@localhost")
+        self.fix(run)
+        run.record_fix(1)
+        self.no_findings(run, 2)
+        run.restack()
+        run.verify()
+        run.plan()
+        with self.assertRaisesRegex(core.Error, "Synthetic Stack Review identity"):
+            run.push(dry_run=True)
+
+    def test_ownership_failure_can_be_amended_and_verdict_remapped(self):
+        run = self.start()
+        self.finding(run)
+        old = self.fix(run)
+        wt = run.worktree(run.entry(1))
+        (wt / "base.txt").write_text("unrelated refactor\n")
+        core.git(wt, "add", "base.txt")
+        core.git(wt, "commit", "--amend", "--no-edit")
+        bad = core.git(wt, "rev-parse", "HEAD")
+        with self.assertRaisesRegex(core.Error, "base.txt:1"):
+            run.record_fix(1, [f"{old}={bad}"])
+        self.assertEqual(core.read_json(run.pr_dir(run.entry(1)) / "verdicts.json")[0]["commit"], old)
+        audit = core.read_json(run.pr_dir(run.entry(1)) / "ownership.json")
+        self.assertEqual(audit[0]["fix_commit"], bad)
+        core.git(wt, "restore", "--source=HEAD^", "--staged", "--worktree", "--", "base.txt")
+        core.git(wt, "commit", "--amend", "-m", "correct first within scope")
+        fixed = core.git(wt, "rev-parse", "HEAD")
+        run.record_fix(1, [f"{old}={fixed}"])
+        self.assertEqual(run.entry(1)["verdicts"][0]["commit"], fixed)
+        self.assertEqual(core.read_json(run.pr_dir(run.entry(1)) / "verdicts.before-remap.json")[0]["commit"], old)
+
+    def test_existing_base_resume_survives_base_advance(self):
+        run = self.start()
+        self.advance_base()
+        resumed = core.create(self.home, self.config, manifest=self.manifest, again=True,
+                              resume_run=run.state["id"])
+        self.assertEqual(resumed, run.state["id"])
+
+    def test_file_scoped_checks_with_only_deletions_do_not_run(self):
+        run = self.start()
+        p = run.entry(1)
+        self.finding(run)
+        wt = run.worktree(p)
+        core.git(wt, "rm", "one.txt")
+        core.git(wt, "commit", "-m", "remove obsolete first file")
+        run.cfg["checks"] = [{"name": "must not run", "argv": [sys.executable, "-c",
+                              "raise SystemExit(99)", "{files}"]}]
+        result = run.execute_commands(p, wt, "checks")
+        self.assertEqual(result[0]["returncode"], 0)
+        self.assertEqual(result[0]["skipped"], "No existing changed files")
 
     def test_equal_commit_subjects_do_not_drop_unrelated_changes(self):
         (self.source / "two.txt").write_text("upper change with same commit title\n")
@@ -499,6 +614,17 @@ class ContractTests(unittest.TestCase):
             core.chain([pr(1, "a", "b"), pr(2, "b", "a")], 1)
         with self.assertRaisesRegex(core.Error, "contiguous"):
             core.validate_manifest([pr(1, "a", "main"), pr(2, "b", "main")])
+
+    def test_chain_ignores_unrelated_duplicate_heads_but_rejects_its_own(self):
+        def pr(n, head, base):
+            return {"number": n, "headRefName": head, "baseRefName": base}
+        stack = [pr(1, "one", "main"), pr(2, "two", "one")]
+        unrelated = [pr(3, "hotfix", "main"), pr(4, "hotfix", "staging")]
+        self.assertEqual(core.chain(stack + unrelated, 2), stack)
+        with self.assertRaisesRegex(core.Error, "Ambiguous.*one"):
+            core.chain(stack + [pr(5, "one", "staging")], 2)
+        with self.assertRaisesRegex(core.Error, "Ambiguous.*two"):
+            core.chain(stack + [pr(5, "two", "staging")], 1)
 
     def test_settings_reject_typos_shell_strings_and_escaping_paths(self):
         with tempfile.TemporaryDirectory() as temporary:

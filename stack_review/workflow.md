@@ -114,6 +114,15 @@ Use `next --run ID` to determine the next phase. For each PR:
    commits valid fixes in the named worktree. Then run `record-fix --run ID --pr N`.
    WONTFIX and NEEDS-USER require reasons. Do not build unresolved product choices.
 
+If `record-fix` blocks on ownership, read its commit/file/line details and
+ownership.json. Keep `ownership_policy=stack` unless the user explicitly permits
+base edits. Correct the out-of-scope hunk in the existing fix worktree, amend or
+rebase only the fix commits, then call `record-fix --run ID --pr N --remap OLD_SHA=NEW_SHA`
+for each rewritten FIX commit (repeat --remap). The runner validates the new
+history and audit before updating verdict SHAs, and saves verdicts.before-remap.json.
+If dropping a whole fix, reevaluate its finding and update its verdict/reason;
+do not retain a FIX verdict for a discarded commit. No run.json edits are needed.
+
 The runner reuses exact matching reviews, including settled no-fix verdicts. Cached
 findings without an independent evaluation still get a fresh fixer. Changed patches
 with matching base/dependency/rule context get a delta brief with previous findings;
@@ -132,8 +141,13 @@ Keep cross-PR leads in the review/fix handoff rather than losing them.
 
 ## Integrate and verify
 
-`restack --run ID` replays each PR and its fixes onto the new lower head, entirely
-inside the private run clone. It does not edit the developer's working branch.
+`restack --run ID` preserves the root PR's existing base point by default and
+replays upper PRs onto the new lower head inside the private run clone. It does
+not edit the developer's working branch or pull in newer staging/main changes.
+To explicitly integrate the base tip frozen at start, configure `--restack-base latest`
+before creating the run; `--restack-base existing` restores the default.
+The publication plan names the policy and actual root base point. Base advances
+alone do not block default-mode publication or repair; stack branch leases still apply.
 A conflict preserves its worktree and prints the Git error. Inspect
 `status --run ID` and run.json's restack_pending PR. Resolve there, stage explicit
 paths, and run `restack --run ID --continue`. Preserve both sides' intended behavior;
@@ -141,7 +155,13 @@ a product choice remains for the user. Do not remove/recreate paused worktrees.
 If a rebase was aborted, start a fresh run; do not rewrite run.json manually.
 
 `verify --run ID` runs configured checks on EVERY final PR head and blocks on
-nonzero exits, missing tools and timeouts. Inspect per-PR check logs. If checks
+nonzero exits, missing tools and timeouts. Inspect per-PR check logs on failure;
+report successful checks concisely without replaying their logs. In particular,
+oxfmt's “Unable to load your Tailwind CSS v3 config” notice on a zero exit stays
+in the log; it is not a verification failure. If Tailwind-aware formatting is
+required, configure worktree dependency setup rather than suppressing a failure.
+`{files}` uses each final PR's recorded base, omits deletions and missing files,
+and skips file-scoped commands when no eligible files remain. If checks
 require dependencies, configure setup_commands before starting. If verification
 finds a real stack-owned regression, use the controlled repair flow below. Do not
 manually amend final heads or restart completed reviews for that local repair.
@@ -180,7 +200,8 @@ NEEDS-USER with a recommendation, not weakened checks or guessed configuration.
 The default bound is three repair rounds (and three patch-review attempts per round).
 If the bound is reached, stop and explain the blocker. `repair cancel --run ID`
 restores an unchanged repair's checkpoint; it refuses to discard existing fix work.
-A changed remote branch or root base requires a fresh run to review new context;
+A changed remote stack branch requires a fresh run to review new context;
+with `restack_base=latest`, a changed root base also requires a fresh run;
 never override a lease or erase a concurrent session's commits.
 
 ## Review and publish
@@ -196,8 +217,9 @@ After approval: `approve --run ID --digest <plan digest>`, then `push --run ID`.
 The approval record is a workflow gate, not cryptographic proof of a human act;
 the host must only issue approve after actual authorization. Edited descriptions
 require a fresh plan and approval. Recorded findings/verdicts and final heads are
-immutable outside the controlled repair flow. A moved remote branch or root base
-blocks publication; use a new run, never bypass the lease.
+immutable outside the controlled repair flow. A moved remote stack branch blocks
+publication; use a new run, never bypass the lease. Root base movement blocks only
+`restack_base=latest` runs; default runs retain their existing root base point.
 
 Branches push atomically. PR bodies update afterward and can partially fail;
 retry push with the same run and approval to finish. A changed external body

@@ -111,7 +111,7 @@ def inspect(home, checkout):
 
 def configure(home, checkout, repository=None, remote=None, checks=None, setup=None, contexts=None, replace=False,
               optional_skills=None, required_skills=None, ci_enabled=None, ci_interval=None, ci_timeout=None,
-              expected_checks=None, repair_limit=None):
+              expected_checks=None, repair_limit=None, restack_base=None):
     observed = inspect(home, checkout)
     path = Path(observed["settings_path"])
     if observed["configured"] and not replace:
@@ -135,6 +135,8 @@ def configure(home, checkout, repository=None, remote=None, checks=None, setup=N
     for key, value in (("enabled", ci_enabled), ("poll_interval", ci_interval), ("timeout", ci_timeout), ("expected_checks", expected_checks)):
         if value is not None:
             cfg["ci"][key] = value
+    if restack_base is not None:
+        cfg["restack_base"] = restack_base
     if repair_limit is not None:
         cfg["max_repair_rounds"] = repair_limit
     if optional_skills is not None or required_skills is not None:

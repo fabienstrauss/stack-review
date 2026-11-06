@@ -87,7 +87,7 @@ DEFAULTS = {
     "checks": [], "setup_commands": [], "command_timeout": 600,
     "forbidden_paths": ["node_modules/**", "**/node_modules/**", ".env", ".env.*"],
     "standing_decisions": [], "allow_skip_checks": False,
-    "ownership_policy": "stack",
+    "ownership_policy": "stack", "restack_base": "existing",
     "specialist_skills": [],
     "max_repair_rounds": 3,
     "ci": {"enabled": True, "poll_interval": 30, "timeout": 1800, "expected_checks": []},
@@ -123,6 +123,8 @@ def settings(path):
         raise Error("command_timeout must be a positive integer")
     if type(cfg["allow_skip_checks"]) is not bool:
         raise Error("allow_skip_checks must be boolean")
+    if cfg["restack_base"] not in ("existing", "latest"):
+        raise Error("restack_base must be existing or latest (the base tip frozen at start)")
     if cfg["ownership_policy"] not in ("stack", "report"):
         raise Error("ownership_policy must be stack (block base edits) or report")
     if not isinstance(cfg["specialist_skills"], list):
@@ -175,17 +177,20 @@ def chain(prs, number):
         raise Error(f"PR #{number} was not found")
     by_head = {}
     for p in prs:
-        if p["headRefName"] in by_head:
-            raise Error("Ambiguous PR head branches")
-        by_head[p["headRefName"]] = p
+        by_head.setdefault(p["headRefName"], []).append(p)
     selected, seen = [by_number[number]], {number}
     while selected[0]["baseRefName"] in by_head:
-        p = by_head[selected[0]["baseRefName"]]
+        parents = by_head[selected[0]["baseRefName"]]
+        if len(parents) != 1:
+            raise Error(f"Ambiguous PR head branch on stack: {selected[0]['baseRefName']}")
+        p = parents[0]
         if p["number"] in seen:
             raise Error("Cycle in PR stack")
         selected.insert(0, p)
         seen.add(p["number"])
     while True:
+        if len(by_head[selected[-1]["headRefName"]]) != 1:
+            raise Error(f"Ambiguous PR head branch on stack: {selected[-1]['headRefName']}")
         children = [p for p in prs if p["baseRefName"] == selected[-1]["headRefName"]]
         if not children:
             return selected
@@ -298,7 +303,8 @@ def create(root, config_path, number=None, manifest=None, scope="stack", again=F
                 continue
             matching = previous.get("request_key") == request_key
             if previous.get("resume_key") == resume_key and previous.get("prs"):
-                matching = observed_heads.get(f"refs/heads/{previous['prs'][0]['base']}") == previous.get("base_sha")
+                matching = (previous["config"].get("restack_base", "latest") == "existing" or
+                            observed_heads.get(f"refs/heads/{previous['prs'][0]['base']}") == previous.get("base_sha"))
                 for old, current in zip(previous["prs"], prs):
                     matching = matching and observed_heads.get(f"refs/heads/{old['head']}") in {old["original"], old.get("new")}
                     proposed = file.parent / "prs" / str(old["number"]) / "body.new.md"
@@ -319,6 +325,10 @@ def create(root, config_path, number=None, manifest=None, scope="stack", again=F
             return {"resume_candidates": sorted(candidates), "next": "Confirm another session is not using this run, then start with --resume-run ID; --new-run keeps sessions independent"}
         if ci_followups:
             return {"ci_followups": sorted(ci_followups, reverse=True), "next": "Continue CI follow-up on the matching published revision; use --new-run for an independent review"}
+    identity = {key: git(cfg["checkout"], "config", "--get", f"user.{key}", check=False)
+                for key in ("name", "email")}
+    if not all(identity.values()) or identity["email"].lower() == "stack-review@localhost":
+        raise Error("Configure user.name and user.email in the source checkout before creating a run")
     run_id = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ-") + uuid.uuid4().hex[:12]
     directory = Path(root).expanduser().resolve() / "runs" / run_id
     directory.mkdir(parents=True, mode=0o700)
@@ -336,8 +346,8 @@ def create(root, config_path, number=None, manifest=None, scope="stack", again=F
     git(repo, "remote", "set-url", "origin", remote)
     git(repo, "config", "core.hooksPath", "/dev/null")
     git(repo, "config", "rerere.enabled", "false")
-    git(repo, "config", "user.name", "Stack Review")
-    git(repo, "config", "user.email", "stack-review@localhost")
+    for key, value in identity.items():
+        git(repo, "config", f"user.{key}", value)
     # Use run-local refs; never trust remote-tracking refs from the source checkout.
     branches = [prs[0]["baseRefName"]] + [p["headRefName"] for p in prs]
     git(repo, "fetch", "--no-tags", "origin", *[f"+refs/heads/{b}:refs/remotes/origin/{b}" for b in branches])
@@ -555,8 +565,9 @@ Return verdict counts, fix commits and outstanding decisions.
 
     def execute_commands(self, p, worktree, group):
         results = []
-        files = git(worktree, "diff", "--name-only", "-z", p["base_point"], "HEAD", raw=True).split("\0")
-        files = [f for f in files if f]
+        files = git(worktree, "diff", "--no-renames", "--diff-filter=d", "--name-only", "-z",
+                    p.get("new_base", p["base_point"]), "HEAD", raw=True).split("\0")
+        files = [f for f in files if f and (worktree / f).is_file()]
         for spec in self.cfg[group]:
             argv = []
             for arg in spec["argv"]:
@@ -564,6 +575,10 @@ Return verdict counts, fix commits and outstanding decisions.
                     argv.extend(files)
                 else:
                     argv.append(arg.replace("{worktree}", str(worktree)))
+            if "{files}" in spec["argv"] and not files:
+                results.append({"name": spec["name"], "argv": argv, "returncode": 0,
+                                "skipped": "No existing changed files"})
+                continue
             cwd = inside(worktree, spec.get("cwd", "."))
             log = self.pr_dir(p) / f"{group}-r{self.state.get('revision', 0)}-{len(results)}.log"
             try:
@@ -582,7 +597,7 @@ Return verdict counts, fix commits and outstanding decisions.
         if git(worktree, "status", "--porcelain", "--untracked-files=all"):
             raise Error(f"Worktree has uncommitted or untracked changes: {worktree}")
 
-    def record_fix(self, number):
+    def record_fix(self, number, remaps=None):
         p = self.entry(number)
         if p["phase"] != "fix" or not p.get("prepared"):
             raise Error("PR is not awaiting a prepared fix")
@@ -595,6 +610,20 @@ Return verdict counts, fix commits and outstanding decisions.
         if git(worktree, "rev-list", "--merges", f"{p['original']}..{head}"):
             raise Error("Fix history must be linear")
         verdicts = read_json(self.pr_dir(p) / "verdicts.json")
+        if remaps:
+            mapping = {}
+            for value in remaps:
+                old, separator, new = value.partition("=")
+                if (not separator or not re.fullmatch(r"[a-f0-9]{40}", old)
+                        or new not in commits or old in mapping or old in commits
+                        or not any(v.get("verdict") == "FIX" and v.get("commit") == old for v in verdicts)):
+                    raise Error("--remap requires distinct OLD_SHA=NEW_SHA pairs from stale FIX verdicts to current fix commits")
+                # Only remap commits from this PR's original fix history.
+                if command(["git", "merge-base", "--is-ancestor", p["original"], old], cwd=worktree, check=False).returncode:
+                    raise Error("Remapped commit must descend from the frozen PR head")
+                mapping[old] = new
+            verdicts = [{**v, "commit": mapping.get(v["commit"], v["commit"])}
+                        if v.get("verdict") == "FIX" else v for v in verdicts]
         validate_verdicts(verdicts, p["findings"], commits)
         changed = []
         for commit in commits:
@@ -605,14 +634,23 @@ Return verdict counts, fix commits and outstanding decisions.
         # Preserve the ownership proof as a report, never claim text matching proves authorship.
         audit = []
         for commit in commits:
-            audit.extend(ownership_audit(worktree, self.state["base_sha"], f"{commit}^", commit))
+            audit.extend({**item, "fix_commit": commit} for item in
+                         ownership_audit(worktree, self.state["base_sha"], f"{commit}^", commit))
         atomic_json(self.pr_dir(p) / "ownership.json", audit)
         if audit and self.cfg["ownership_policy"] == "stack":
-            raise Error(f"Fix edits lines outside the stack's added lines; inspect {self.pr_dir(p) / 'ownership.json'}")
+            locations = "; ".join(f"{a['fix_commit']} {a['file']}:{a['line']}" for a in audit[:10])
+            raise Error(f"Fix edits lines outside the stack's added lines: {locations}. "
+                        f"Full audit: {self.pr_dir(p) / 'ownership.json'}. "
+                        "Restore the out-of-scope hunk in the fix worktree, amend/rebase the fix commits, "
+                        "then record-fix --remap OLD_SHA=NEW_SHA (repeat for each rewritten FIX commit). "
+                        "For a dropped fix, reevaluate its finding and verdict before recording.")
         p["ownership_audit"] = audit
         body = self.pr_dir(p) / "body.new.md"
         if body.exists() and not body.read_text().strip():
             raise Error("Updated PR body cannot be empty")
+        if remaps:
+            atomic_json(self.pr_dir(p) / "verdicts.before-remap.json", read_json(self.pr_dir(p) / "verdicts.json"))
+            atomic_json(self.pr_dir(p) / "verdicts.json", verdicts)
         p.update(verdicts=verdicts, fix_head=head, fix_commits=commits, phase="done")
         git(self.repo, "update-ref", f"refs/stack-review/{number}/fixed", head)
         self.save()
@@ -632,7 +670,8 @@ Return verdict counts, fix commits and outstanding decisions.
         pending = self.state.get("restack_pending")
         if pending and not resume:
             raise Error("Restack is paused; resolve in its worktree and use restack --continue")
-        below = self.state["base_sha"]
+        below = (self.state["prs"][0]["base_point"] if self.cfg.get("restack_base", "latest") == "existing"
+                 else self.state["base_sha"])
         for p in self.state["prs"]:
             if p.get("new"):
                 below = p["new"]
@@ -742,6 +781,8 @@ Return verdict counts, fix commits and outstanding decisions.
                         "selected": p.get("selected", True)})
         return {"run": self.state["id"], "repository": self.cfg["repository"], "remote": self.state["remote"],
                 "base_branch": self.state["prs"][0]["base"], "base_sha": self.state["base_sha"],
+                "restack_base": self.cfg.get("restack_base", "latest"),
+                "root_base_point": self.state["prs"][0]["new_base"],
                 "scope": self.state.get("scope", "stack"), "missing_optional_skills": self.state.get("specialists", {}).get("missing_optional", []),
                 "revision": self.state.get("revision", 0), "repairs": self.state.get("repairs", []),
                 "input_digest": self.state["input_digest"], "verification": verification, "prs": prs}
@@ -755,7 +796,8 @@ Return verdict counts, fix commits and outstanding decisions.
                  "| --- | --- | --- | --- | --- |"]
         for p in plan["prs"]:
             lines.append(f"| #{p['number']} | {p['branch']} | {p['expected']} | {p['new']} | {p['body_after'] is not None} |")
-        lines += ["", "## Verdicts and ownership", ""]
+        lines += ["", f"Restack base policy: {plan['restack_base']}; root base point: {plan['root_base_point']}.",
+                  "", "## Verdicts and ownership", ""]
         lines.append("Review scope: " + plan["scope"] + ". All listed branches are integration/publication scope, including unselected upper PRs.")
         if plan["missing_optional_skills"]:
             lines.append("Missing optional skills: " + ", ".join(plan["missing_optional_skills"]))
@@ -801,8 +843,14 @@ Return verdict counts, fix commits and outstanding decisions.
         for line in git(self.repo, "ls-remote", plan["remote"], *refs).splitlines():
             sha, ref = line.split("\t")
             remote_heads[ref] = sha
-        if remote_heads.get(f"refs/heads/{plan['base_branch']}") != plan["base_sha"]:
+        if (plan["restack_base"] == "latest" and
+                remote_heads.get(f"refs/heads/{plan['base_branch']}") != plan["base_sha"]):
             raise Error("Remote stack base moved since inputs were frozen; review a fresh run")
+        for p in self.state["prs"]:
+            identities = git(self.repo, "log", "--format=%H %ae %ce", f"{p['new_base']}..{p['new']}")
+            for line in identities.splitlines():
+                if "stack-review@localhost" in line.lower().split():
+                    raise Error(f"Synthetic Stack Review identity in publication history: {line.split()[0]}; correct the commit identity before publishing")
         journal = self.state.setdefault("publication", {"branches": False, "bodies": []})
         for p in plan["prs"]:
             current = remote_heads.get(f"refs/heads/{p['branch']}")

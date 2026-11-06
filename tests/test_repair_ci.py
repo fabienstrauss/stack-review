@@ -99,6 +99,28 @@ class RepairAndCITests(unittest.TestCase):
         run.push()
         self.assertEqual(self.remote_head("part-2"), run.entry(2)["new"])
 
+    def test_default_repair_and_publish_survive_root_base_movement(self):
+        run = self.published()
+        fixtures.PipelineTests.advance_base(self)
+        repair.begin(run, 1, "CI regression after base advanced")
+        self.commit_repair(run)
+        self.accept_repair(run)
+        repair.restack(run)
+        run.verify()
+        plan = run.plan()
+        run.approve(plan["digest"])
+        run.push()
+        self.assertEqual(self.remote_head("part-2"), run.entry(2)["new"])
+        self.assertFalse((run.worktree(run.entry(2)) / "unrelated.txt").exists())
+
+    def test_latest_mode_repair_refuses_moved_root_base(self):
+        self.config_data["restack_base"] = "latest"
+        core.atomic_json(self.config, self.config_data)
+        run = self.published()
+        fixtures.PipelineTests.advance_base(self)
+        with self.assertRaisesRegex(core.Error, "Root base moved"):
+            repair.begin(run, 1, "CI failure")
+
     def test_published_ci_repair_uses_new_leases_and_reuses_unchanged_lower_checks(self):
         run = self.published()
         old_plan = run.state["plan"]
