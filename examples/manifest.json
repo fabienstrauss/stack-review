@@ -1,0 +1,4 @@
+[
+  {"number": 101, "title": "First change", "body": "Adds the first part.", "baseRefName": "main", "headRefName": "feature/part-1"},
+  {"number": 102, "title": "Second change", "body": "Adds the second part.", "baseRefName": "feature/part-1", "headRefName": "feature/part-2"}
+]

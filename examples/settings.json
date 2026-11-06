@@ -1,0 +1,25 @@
+{
+  "schema_version": 1,
+  "checkout": "/absolute/path/to/your/checkout",
+  "repository": "your-org/your-repo",
+  "remote": "origin",
+  "context_files": ["AGENTS.md"],
+  "standing_decisions": [],
+  "checks": [
+    {
+      "name": "unit tests",
+      "argv": ["python3", "-m", "unittest", "discover", "-s", "tests"],
+      "cwd": "."
+    }
+  ],
+  "setup_commands": [],
+  "command_timeout": 600,
+  "forbidden_paths": ["node_modules/**", "**/node_modules/**", ".env", ".env.*"],
+  "ownership_policy": "stack",
+  "allow_skip_checks": false,
+  "agents": {
+    "reviewer_model": "sonnet",
+    "fixer_model": "sonnet",
+    "effort": "high"
+  }
+}
