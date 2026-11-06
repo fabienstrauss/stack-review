@@ -7,7 +7,7 @@ import re
 import shlex
 import tempfile
 
-from .core import DEFAULTS, Error, atomic_json, git, lock, read_json, settings
+from .core import DEFAULTS, Error, atomic_json, digest, git, lock, read_json, settings
 
 
 def checkout_root(checkout):
@@ -24,6 +24,36 @@ def repository_name(url):
     # Extract only the owner/repository; never return a credential-bearing remote URL.
     match = re.fullmatch(r"(?:git@github\.com:|https://(?:[^/@]+@)?github\.com/|ssh://git@github\.com/)([\w.-]+/[\w.-]+?)(?:\.git)?/?", url)
     return match.group(1) if match else None
+
+
+def signature(cfg):
+    root = Path(cfg["checkout"])
+    files = {root / n for n in ("AGENTS.md", "CLAUDE.md", ".hermes.md", "package.json", "package-lock.json",
+                               "pnpm-lock.yaml", "yarn.lock", "bun.lock", "bun.lockb", "pyproject.toml",
+                               "requirements.txt", "pytest.ini", "Makefile", "Cargo.toml", "Cargo.lock", "go.mod", "go.sum")}
+    files.update(Path(p).expanduser() if Path(p).expanduser().is_absolute() else root / p for p in cfg["context_files"])
+    files.update((root / ".github/workflows").glob("*.yml"))
+    files.update((root / ".github/workflows").glob("*.yaml"))
+    # Include the referenced skill documents without executing any discovered helpers.
+    for spec in cfg["specialist_skills"]:
+        path = Path(spec["path"]).expanduser()
+        if not path.is_absolute():
+            path = root / path
+        files.update(path.rglob("*.md") if path.is_dir() else [path])
+    observed = {}
+    for file in sorted(files):
+        observed[str(file)] = hashlib.sha256(file.read_bytes()).hexdigest() if file.is_file() else None
+    return {"digest": digest(observed), "files": observed}
+
+
+def stale(path, cfg):
+    observation = Path(path).with_name("observed.json")
+    if not observation.is_file():
+        return {"stale": True, "reason": "Saved project settings have not been checked against current project metadata"}
+    old = read_json(observation)
+    current = signature(cfg)
+    changed = [p for p in sorted(set(old["files"]) | set(current["files"])) if old["files"].get(p) != current["files"].get(p)]
+    return {"stale": bool(changed), "changed_files": changed}
 
 
 def inspect(home, checkout):
@@ -72,13 +102,15 @@ def inspect(home, checkout):
         cfg["checks"] = [candidates[0]]
     existing = settings(path) if path.exists() else None
     return {"checkout": str(root), "settings_path": str(path), "configured": existing is not None,
-            "settings": existing, "proposal": cfg, "check_candidates": candidates,
+            "settings": existing, "settings_health": stale(path, existing) if existing else None,
+            "proposal": cfg, "check_candidates": candidates,
             "evidence": evidence, "remote_names": remotes,
             "needs": (["Git remote"] if not remote else []) + (["GitHub repository"] if not repository else []) + (["verification command"] if not candidates else []),
             "notice": "Suggestions only. Read project rules and script definitions before accepting; nothing was executed or saved."}
 
 
-def configure(home, checkout, repository=None, remote=None, checks=None, setup=None, contexts=None, replace=False):
+def configure(home, checkout, repository=None, remote=None, checks=None, setup=None, contexts=None, replace=False,
+              optional_skills=None, required_skills=None):
     observed = inspect(home, checkout)
     path = Path(observed["settings_path"])
     if observed["configured"] and not replace:
@@ -98,6 +130,15 @@ def configure(home, checkout, repository=None, remote=None, checks=None, setup=N
             cfg[key] = [{"name": f"{key}-{i + 1}", "argv": shlex.split(value), "cwd": "."} for i, value in enumerate(values)]
     if contexts is not None:
         cfg["context_files"] = contexts
+    if optional_skills is not None or required_skills is not None:
+        specs = []
+        for required, values in ((False, optional_skills or []), (True, required_skills or [])):
+            for value in values:
+                if "=" not in value:
+                    raise Error("Skill references use name=/path/to/skill")
+                name, path_value = value.split("=", 1)
+                specs.append({"name": name, "path": path_value, "required": required})
+        cfg["specialist_skills"] = specs
     if not cfg["repository"]:
         raise Error("Could not infer the GitHub repository. Supply --repository owner/repo")
     if not cfg["checks"]:
@@ -111,4 +152,5 @@ def configure(home, checkout, repository=None, remote=None, checks=None, setup=N
         if path.exists() and not replace:
             return {"settings": str(path), "reused": True}
         atomic_json(path, cfg)
+        atomic_json(path.with_name("observed.json"), signature(cfg))
     return {"settings": str(path), "reused": False, "next": "Project ready. Start the requested review; do not ask the user to run CLI commands."}

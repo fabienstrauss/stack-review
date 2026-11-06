@@ -16,6 +16,7 @@
   "command_timeout": 600,
   "forbidden_paths": ["node_modules/**", "**/node_modules/**", ".env", ".env.*"],
   "ownership_policy": "stack",
+  "specialist_skills": [],
   "allow_skip_checks": false,
   "agents": {
     "reviewer_model": "sonnet",

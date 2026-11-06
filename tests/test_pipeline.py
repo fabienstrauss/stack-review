@@ -61,8 +61,9 @@ class PipelineTests(unittest.TestCase):
     def g(self, *args):
         return core.git(self.source, *args)
 
-    def start(self):
-        return core.Run(self.home, core.create(self.home, self.config, manifest=self.manifest))
+    def start(self, **options):
+        options.setdefault("again", True)
+        return core.Run(self.home, core.create(self.home, self.config, manifest=self.manifest, **options))
 
     def finding(self, run, number=1):
         p = run.entry(number)
@@ -394,6 +395,8 @@ class PipelineTests(unittest.TestCase):
             self.assertTrue(run.state["publication"]["branches"])
             self.assertEqual(self.remote_head("part-1"), run.entry(1)["new"])
             run = core.Run(self.home, run.state["id"])
+            resumed = core.create(self.home, self.config, manifest=self.manifest, again=True, resume_run=run.state["id"])
+            self.assertEqual(resumed, run.state["id"])
             current_body[0] = "Another person's edit"
             with self.assertRaisesRegex(core.Error, "body changed"):
                 run.push()

@@ -16,9 +16,31 @@ Extract the PR number from the request; for a URL verify its owner/repo against
 the selected checkout. Ask which checkout only if the session/URL does not resolve
 it unambiguously. No PR supplied: ask for the PR number, not CLI details.
 
+Map the user's request before starting:
+
+| User request | Runner selection |
+| --- | --- |
+| `/stack-review 123`, “stack of 123” | `start --pr 123` (whole stack) |
+| “only PR 123”, `/stack-review pr 123` | `start --pr 123 --scope single` |
+| “from PR 123 upward” | `start --pr 123 --scope from` |
+| “again”, “full re-review” | Add `--again` (bypass reuse and delta mode) |
+| “review only”, “report without fixing” | Add `--review-only` (no fixes/rebase/push) |
+| “also check existing feedback” | Add `--include-feedback` (inline PR comments) |
+| Additional focus/constraints | Preserve them in `--instructions '<user request>'` |
+
+Interpret natural language; users need not know runner flags. A bare number means
+the whole containing stack for compatibility. Single/from selects which PRs get
+reviewed; integration can still rebase upper PRs. Explain that scope before running
+and include every affected branch in the publication report. Separate independent
+stacks use separate run IDs; deduplicate requests in the same chain. Never pretend
+the inline-feedback option includes every general discussion or only unresolved threads.
+
 Run `RUNNER project inspect --checkout <checkout>`. This reads Git metadata,
 instruction filenames and known manifest/test metadata, runs no project scripts,
-and saves nothing. If configured, reuse its saved settings and continue.
+and saves nothing. If configured and settings_health is current, reuse its saved
+settings. If settings_health says stale (changed instructions/manifests/lockfiles/
+specialist documents), read the changed sources and refresh with configure --replace.
+Do not replace deliberate preferences merely because a different default is detected.
 On first use, read the applicable project instructions, candidate script definitions,
 and CI guidance. Detected test commands are suggestions, not proven suitable checks:
 avoid watch modes, interactive jobs, deployment commands and prohibited typechecks.
@@ -44,11 +66,33 @@ overrides (or edit and validate them yourself). Never change unrelated preferenc
 Never copy personal settings, credentials, private notes or run artifacts into the
 distributed package. Explicit --settings remains an advanced escape hatch.
 
+Before starting, check whether this host actually provides fresh subagent delegation.
+Use `RUNNER preflight --checkout <checkout> --delegation available` ONLY when its
+tools confirm that capability. Otherwise pass unavailable/unknown and stop: do not
+silently combine independent review and fixing in one agent. Preflight checks Git,
+GitHub CLI, sign-in, repository access, configured executables and specialist skills;
+it never executes setup or test scripts. An offline manifest may use --offline.
+Handle errors in plain language and help with the missing prerequisite, then rerun.
+Project-local executables can be deferred until dependency setup; disclose that.
+
+Optional specialist skills can be added with project configure --skill
+'name=/path/to/skill'; --require-skill makes availability mandatory. The agent
+handles those flags from a normal user request. No external skill is required by
+default. Missing optional skills are disclosed; required ones block. Apply relevant
+frozen Markdown guidance in specialists.json; do not automatically run its helpers.
+
 `RUNNER start --checkout <checkout> --pr N` reuses saved project settings and discovers the ENTIRE containing stack,
 including PRs below and above N. Tell the user that scope. Retain its returned run
 ID explicitly in every subsequent command; there is no implicit current run.
 `stack-review list` and `status --run ID` find/resume runs. Always specify the same
 `--home <path>` global option if using a custom runtime root.
+
+If start returns resume_candidates, do not duplicate the expensive work. Continue
+directly when the current conversation already owns that run ID. For a run from
+another session, confirm that session is not still using it before passing the same
+start options plus --resume-run ID. A kernel lock guards commands, not idle agents;
+an unlocked run is not proof that its agent finished. When the user wants independent
+work, use --new-run. Changed remote heads, scope, rules or instructions block resume.
 
 In the rest of this document, replace `stack-review` with RUNNER from runner.md.
 Execute these steps autonomously with progress updates. The normal user interaction
@@ -65,6 +109,17 @@ Use `next --run ID` to determine the next phase. For each PR:
    fixer. It independently evaluates every finding, writes verdicts.json and
    commits valid fixes in the named worktree. Then run `record-fix --run ID --pr N`.
    WONTFIX and NEEDS-USER require reasons. Do not build unresolved product choices.
+
+The runner reuses exact matching reviews, including settled no-fix verdicts. Cached
+findings without an independent evaluation still get a fresh fixer. Changed patches
+with matching base/dependency/rule context get a delta brief with previous findings;
+changed context gets a full review. --again always forces a full review. State which
+PRs are cached/delta/full in the progress update. Do not manually bypass the cache
+or infer that a matching patch alone proves the review is reusable.
+
+For review-only mode, record the findings and run `report --run ID` when next says
+report. Deliver its SUMMARY.md and stop. The runner refuses fixes, restack and push
+for such runs; there is no publication approval to request.
 
 Run bottom-up. Do not run two agents against the same PR phase. Separate runs can
 proceed concurrently. Subagent failure is not evidence that its artifacts are

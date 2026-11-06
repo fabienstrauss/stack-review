@@ -1,65 +1,63 @@
 #!/usr/bin/env python3
-"""Dependency-free explicit installation; does not configure credentials or change existing skills."""
+"""Install/update the skill, or roll back/uninstall an owned installation."""
 import argparse
+import json
 import os
 from pathlib import Path
-import shutil
 import sys
+
+if sys.version_info < (3, 10):
+    raise SystemExit('Stack review requires Python 3.10 or newer.')
+
+from stack_review.core import Error, read_json
+from stack_review.installation import install as managed_install, rollback, uninstall
 
 
 def install(prefix, host=None, skills_dir=None):
-    prefix = Path(prefix).expanduser().resolve()
-    if prefix.exists():
-        raise SystemExit(f"Installation prefix already exists; choose a new prefix: {prefix}")
-    hosts = ("hermes", "claude") if host == "both" else (host,) if host else ()
-    if len(hosts) == 2 and skills_dir:
-        raise SystemExit("--skills-dir selects one exact destination; use --host hermes or claude")
-    for selected in hosts:
-        base = Path(os.environ.get("HERMES_HOME", str(Path.home() / ".hermes"))) if selected == "hermes" else Path.home() / ".claude"
-        target = Path(skills_dir).expanduser() if skills_dir else base / "skills" / "stack-review"
-        if target.exists() or target.is_symlink():
-            raise SystemExit(f"Skill destination already exists; left untouched: {target}")
-    prefix.mkdir(parents=True)
-    source = Path(__file__).resolve().parent / "stack_review"
-    shutil.copytree(source, prefix / "lib" / "stack_review", ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
-    executable = prefix / "bin" / "stack-review"
-    executable.parent.mkdir()
-    executable.write_text(f"#!{sys.executable}\nimport sys\nsys.path.insert(0, {str(prefix / 'lib')!r})\nfrom stack_review.cli import main\nmain()\n")
-    executable.chmod(0o755)
-    if hosts:
-        sys.path.insert(0, str(prefix / "lib"))
-        from stack_review.cli import install_skill
-        for selected in hosts:
-            print(install_skill(selected, skills_dir))
-    print(f"Installed {executable}")
-    print("Ready. Start a fresh Hermes/Claude session in your project and say /stack-review 123.")
-    print("The agent handles first-use setup and all review commands. No PATH change or JSON editing needed.")
-    return executable
+    hosts = ['hermes', 'claude'] if host == 'both' else [host] if host else []
+    result = managed_install(prefix, hosts, skills_dir)
+    print(json.dumps(result, indent=2))
+    return Path(result['installed'])
 
 
-if __name__ == "__main__":
+if __name__ == '__main__':
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--prefix", type=Path, default=Path.home() / ".local/opt/stack-review")
-    parser.add_argument("--host", choices=("hermes", "claude", "both"))
-    parser.add_argument("--skills-dir", type=Path, help="Exact destination for the stack-review skill")
+    parser.add_argument('--prefix', type=Path, default=Path.home() / '.local/opt/stack-review')
+    parser.add_argument('--host', choices=('hermes', 'claude', 'both'))
+    parser.add_argument('--skills-dir', type=Path, help='Exact destination for one host skill')
+    actions = parser.add_mutually_exclusive_group()
+    actions.add_argument('--uninstall', action='store_true')
+    actions.add_argument('--rollback', action='store_true')
     args = parser.parse_args()
-    if args.skills_dir and not args.host:
-        parser.error("--skills-dir requires --host")
-    if not args.host:
-        detected = []
-        if Path(os.environ.get("HERMES_HOME", str(Path.home() / ".hermes"))).is_dir():
-            detected.append("hermes")
-        if (Path.home() / ".claude").is_dir():
-            detected.append("claude")
-        if len(detected) == 1:
-            args.host = detected[0]
-            print(f"Found {args.host}; installing its skill.")
-        else:
-            try:
-                answer = input("Install for [1] Hermes, [2] Claude Code, or [3] both? ").strip().lower()
-            except EOFError:
-                parser.error("Choose a host with --host hermes, --host claude or --host both")
-            args.host = {"1": "hermes", "2": "claude", "3": "both", "hermes": "hermes", "claude": "claude", "both": "both"}.get(answer)
-            if not args.host:
-                parser.error("Choose 1, 2 or 3")
-    install(args.prefix, args.host, args.skills_dir)
+    try:
+        if args.uninstall or args.rollback:
+            if args.host or args.skills_dir:
+                parser.error('Rollback/uninstall uses the recorded installation, not --host or --skills-dir')
+            print(json.dumps(rollback(args.prefix) if args.rollback else uninstall(args.prefix), indent=2))
+            raise SystemExit(0)
+        if args.skills_dir and not args.host:
+            parser.error('--skills-dir requires --host')
+        existing = args.prefix.expanduser().resolve() / 'installation.json'
+        if not args.host and existing.is_file():
+            hosts = [s['host'] for s in read_json(existing)['skills']]
+            args.host = 'both' if len(hosts) == 2 else hosts[0] if hosts else None
+        if not args.host:
+            detected = []
+            if Path(os.environ.get('HERMES_HOME', str(Path.home() / '.hermes'))).is_dir():
+                detected.append('hermes')
+            if (Path.home() / '.claude').is_dir():
+                detected.append('claude')
+            if len(detected) == 1:
+                args.host = detected[0]
+                print(f'Found {args.host}; installing its skill.')
+            else:
+                try:
+                    answer = input('Install for [1] Hermes, [2] Claude Code, or [3] both? ').strip().lower()
+                except EOFError:
+                    parser.error('Choose a host with --host hermes, --host claude or --host both')
+                args.host = {'1': 'hermes', '2': 'claude', '3': 'both', 'hermes': 'hermes', 'claude': 'claude', 'both': 'both'}.get(answer)
+                if not args.host:
+                    parser.error('Choose 1, 2 or 3')
+        install(args.prefix, args.host, args.skills_dir)
+    except Error as exc:
+        parser.exit(3, f'stack-review: {exc}\n')

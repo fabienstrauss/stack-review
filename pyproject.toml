@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "portable-stack-review"
-version = "0.2.0"
+version = "0.3.0"
 description = "Isolated, resumable PR stack reviews for Hermes and Claude Code"
 requires-python = ">=3.10"
 dependencies = []
@@ -16,4 +16,4 @@ stack-review = "stack_review.cli:main"
 include = ["stack_review*"]
 
 [tool.setuptools.package-data]
-stack_review = ["skills/*/*.md", "workflow.md"]
+stack_review = ["skills/*/*.md", "workflow.md", "legacy-v0.2.json"]

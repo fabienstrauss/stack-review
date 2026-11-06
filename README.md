@@ -6,7 +6,7 @@ Git operations, artifacts, verification and publication gates.
 
 This directory is self-contained: copy it into a separate repository to distribute
 it. It contains no personal paths, credentials, project notes or live settings.
-No nested Git repository or remote is created here. Version 0.2 is a tested local
+No nested Git repository or remote is created here. Version 0.3 is a tested local
 implementation; host discovery and a real GitHub publication still need a pilot.
 
 ## Install
@@ -27,7 +27,7 @@ Then open a fresh session in your project and say:
 /stack-review 123
 ```
 
-The agent handles setup, review, fixes, verification and the final approval report.
+The agent handles setup, prerequisite checks, review, fixes, verification and the final approval report.
 You do not run the pipeline commands, edit JSON, or change PATH. You can also give
 a PR URL. `123` selects its entire containing stack, including PRs above and below.
 
@@ -35,8 +35,38 @@ The installer copies the runner under `~/.local/opt/stack-review` and installs t
 skill under the chosen host's personal skills directory. Each installed skill
 records its own runner invocation, so it works even if `stack-review` is not on
 PATH. Installation on disk does not prove the host loaded the skill; a fresh
-session is the discovery check. Existing prefixes/skills are preserved, including
-the original `pr-stack-review` skill; the installer refuses to overwrite them.
+session is the discovery check. The original `pr-stack-review` skill and unrelated
+skills are preserved. Re-running this installer updates a recognized installation
+with a backup. Locally edited or unrecognized files are never overwritten.
+
+## Tell the agent what to review
+
+| Say | Behavior |
+| --- | --- |
+| `/stack-review 123` | Review the stack containing PR 123 |
+| `/stack-review pr 123` or “only PR 123” | Review just that PR |
+| `/stack-review from 123` | Review PR 123 and the PRs above it |
+| “review PR 123 again” | Force a fresh full review |
+| “review PR 123 only, report without fixing” | Findings only; no fixes, rebasing or push |
+| “also check existing review comments” | Evaluate inline comments against current code |
+| “focus on permissions” | Freeze that focus into the review brief and reuse identity |
+
+Unchanged, previously reviewed inputs reuse their review. A changed patch with
+matching surrounding context gets a delta brief; changed base/dependency trees,
+requirements, instructions or specialist guidance get a full review. “Again”
+overrides reuse. Cached findings that have not been independently evaluated still
+get a fixer. Settled no-fix verdicts and verified published fixes can establish the
+next review baseline; unresolved decisions remain visible.
+
+“Only PR 123” limits **review scope**. If its fixes affect stacked branches above
+it, the runner still rebases those branches and includes them in the publication
+plan. Use “review only, no fixes” when you want inspection with no integration.
+Feedback handling currently includes inline comments, not all general discussion
+and not an assertion that every returned comment is unresolved.
+
+An unfinished matching run is offered for resume instead of repeating expensive
+work. Another session may still own it, so takeover is explicit. A request for
+independent work creates a separate run; there is never an implicit global current run.
 
 ## First review in a project
 
@@ -61,6 +91,61 @@ Later, say “use the integration tests for this project” or “also load thes
 notes” and the agent updates the saved preferences. You do not need to know the
 settings schema. Discovery only reads allowlisted metadata; it never runs detected
 scripts. Checks and dependency setup run only during the actual review workflow.
+
+Before work, the agent runs preflight for Git, GitHub CLI/sign-in/repository access,
+configured tools, optional/required specialist skills and actual subagent capability.
+The runner cannot introspect the host's tools: the adapter must report delegation
+availability truthfully. Missing prerequisites are explained before the review.
+Project-local commands may need dependency setup before they can be checked.
+Changed manifests, lockfiles, project instructions, CI files or specialist guidance
+flag saved settings for the agent to revalidate. It preserves deliberate preferences.
+
+## Update, roll back or uninstall
+
+From your clone of this repository:
+
+```sh
+git pull
+python3 install.py
+```
+
+Managed updates keep the selected host(s), back up the previous installation and
+restore it if installation fails. Preferences and review runs live separately and
+are preserved. An unmodified v0.2 installation is recognized by exact source hashes
+and path-specific launcher contents; unknown or customized installations are left
+untouched. Start a fresh agent session after an update.
+
+```sh
+python3 install.py --rollback
+python3 install.py --uninstall
+```
+
+Use the same `--prefix` if you chose a custom installation location. Rollback and
+uninstall refuse changed installed files. Uninstall preserves project settings,
+run data and backups; it does not alter shell profiles or other skills.
+
+## What the scripts handle
+
+| Module | Deterministic work |
+| --- | --- |
+| `install.py`, `installation.py` | Install/update, integrity checks, backup, rollback, uninstall |
+| `onboarding.py`, `preflight.py` | Project discovery, saved preferences, drift and prerequisite checks |
+| `reviews.py` | Review reuse, delta comparisons, specialist snapshots, accepted baselines |
+| `core.py` | PR discovery, frozen clones, worktrees, ownership audits, rebasing/restacking, check execution, summaries, approval and lease-protected atomic pushes |
+| `cli.py` | Short machine-readable phase/status commands for either host |
+| `package.py` | Build a source archive from an explicit allowlist |
+
+Python invokes Git and the GitHub CLI directly. The original personal Bash
+worktree/chain helpers are not required. Agents spend reasoning on reviewing code,
+evaluating findings, writing fixes and resolving actual code conflicts. They do
+not need to construct a rebase loop, track branch tips or parse successful check
+logs. Tool calls still consume some tokens; the scripts reduce repeated reasoning
+and keep routine output in files rather than making it “zero-token.”
+
+No third-party skill is required by default. Ask the agent to add a specialist as
+optional or required. Missing optional skills are named in the report; missing
+required ones block. The runner freezes Markdown guidance for the run and never
+automatically executes a specialist's scripts.
 
 ## Advanced configuration and runner commands
 
@@ -92,6 +177,8 @@ test:ci'`, `--setup 'pnpm install --frozen-lockfile'`, `--context /path/to/notes
 `--repository owner/repo` and `--remote upstream` override detected defaults.
 Repeated `--check` or `--setup` adds commands. `--replace` explicitly revises an
 existing configuration while retaining preferences not overridden.
+`--skill 'name=/path'` adds optional specialist guidance; `--require-skill` makes
+it mandatory. These replace the saved specialist list when explicitly supplied.
 
 For custom or automated integrations, `init --settings <file> --checkout <path>
 --repository owner/repo` and `start --settings <file> --pr N` still work. The schema
@@ -112,6 +199,7 @@ uses Python tests; it is not a universal default.
 | `ownership_policy` | `stack` blocks edits to lines on the frozen root base; `report` exposes them in the plan |
 | `allow_skip_checks` | Permit explicit verification skips with a recorded reason; default false |
 | `agents` | Reviewer/fixer model and effort preferences, interpreted by the host adapter |
+| `specialist_skills` | Optional/required `{name, path, required}` references; none required by default |
 
 Commands use argument arrays, never shell interpolation. `{worktree}` expands
 inside an argument; a standalone `{files}` expands to root-relative changed paths.
@@ -127,6 +215,7 @@ the runner neither invokes a model nor proves which model was used.
 ### Runner lifecycle (handled by the agent)
 
 ```sh
+stack-review preflight --settings /path/to/settings.json --delegation available
 stack-review start --settings /path/to/settings.json --pr 101
 # Keep the returned ID; every following command requires it:
 stack-review next --run RUN_ID
@@ -147,8 +236,10 @@ The host follows [the shared workflow](stack_review/workflow.md) and supplies
 agents between commands. `start --pr N` selects the entire containing stack,
 including PRs below and above N. An explicit
 `--manifest examples/manifest.json` replaces GitHub discovery for controlled or
-offline use. No patch-only cache is used: every run reviews frozen full inputs,
-so changed bases and context do not silently reuse an old review.
+offline use. Review reuse checks frozen code trees, surrounding stack/base trees,
+requirements, user focus, context and runner version. A matching patch alone is
+insufficient. Use --again to force a full review; --new-run explicitly keeps a
+session independent of matching unfinished runs.
 
 Runtime data defaults to `~/.local/share/stack-review`; override with
 `STACK_REVIEW_HOME` or the global `--home` option before the subcommand. Runtime
@@ -193,13 +284,16 @@ The approval record enforces workflow ordering; it cannot authenticate that a
 human authorized it. The agent must respect user authorization. It is not a
 sandbox against an agent that can run arbitrary Git commands.
 
-## Scope of version 0.2
+## Scope of version 0.3
 
-Supports linear, same-repository branch stacks, full reviews, independent fix
-evaluation, per-head verification, conflict continuation and gated publication.
-Ambiguous forks and cyclic stacks are rejected. It intentionally omits automatic
-working-branch integration, board changes, comments, merge automation, incremental
-review caching and inference of squash merges from commit titles. Already
+Supports linear, same-repository branch stacks, single/from/whole-stack selection,
+full/delta/cached reviews, review-only reports, inline-feedback evaluation, specialist
+guidance, independent fix evaluation, per-head verification, conflict continuation,
+safe resume discovery, managed installation lifecycle and gated publication.
+Ambiguous forks, cyclic stacks and PR histories with merge commits are rejected;
+the runner does not silently flatten merge resolutions. It intentionally omits automatic
+working-branch integration, board changes, comment publication, merge automation
+and inference of squash merges from commit titles. Already
 squash-merged lower layers may need manual cleanup before starting a run.
 
 Clones use more disk than shared worktrees. The first release targets macOS/Linux
@@ -220,7 +314,7 @@ stay outside it. To build a source zip containing only explicitly allowlisted fi
 python3 package.py
 ```
 
-Share `dist/stack-review-0.2.0.zip`; recipients unpack it and run install.py. The
+Share `dist/stack-review-0.3.0.zip`; recipients unpack it and run install.py. The
 archive includes the tests and both adapters, with no installed dependencies.
 Publishing the containing personal-setup repository remains an
 explicit action and requires private visibility. This implementation does not

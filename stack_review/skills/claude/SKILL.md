@@ -19,3 +19,7 @@ Disclose unsupported settings rather than silently promising a particular model.
 Agents do not delegate recursively. Return short progress updates between phases.
 Link the final SUMMARY.md and explain all branches and PR bodies in the plan
 before requesting the go to publish.
+Honor single-PR/from/again/review-only requests through the selection table in
+workflow.md. Verify delegation capability in preflight; do not claim it from an
+installed skill file alone. Routine Git plumbing belongs to the runner; inspect
+and resolve code only when a review/fix or actual conflict needs judgment.
