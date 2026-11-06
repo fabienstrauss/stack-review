@@ -17,7 +17,7 @@ repairs keep the work you've already done.
 
 You'll need **Python 3.10+**, **Git**, and the [GitHub CLI](https://cli.github.com)
 signed in with access to your project. Runs on macOS or Linux with Hermes or
-Claude Code and subagent support. Collaborators need access to this private repo.
+Claude Code and subagent support.
 
 ```sh
 git clone https://github.com/fabienstrauss/stack-review.git
