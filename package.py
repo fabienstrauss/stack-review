@@ -6,6 +6,7 @@ import zipfile
 
 FILES = (
     ".gitignore", "README.md", "install.py", "package.py", "pyproject.toml",
+    "assets/logo.svg", "docs/USAGE.md", "docs/CONFIGURATION.md", "docs/INTERNALS.md",
     "examples/manifest.json", "examples/settings.json",
     "stack_review/__init__.py", "stack_review/__main__.py",
     "stack_review/core.py", "stack_review/cli.py", "stack_review/workflow.md",
