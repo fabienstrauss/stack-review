@@ -4,6 +4,7 @@ import json
 import os
 from pathlib import Path
 import shutil
+import shlex
 import sys
 import tempfile
 
@@ -27,6 +28,13 @@ def install_skill(host, destination=None):
         for file in source.iterdir():
             shutil.copy2(file, temporary / file.name)
         shutil.copy2(Path(__file__).parent / "workflow.md", temporary / "workflow.md")
+        runner = temporary / "runner.py"
+        runner.write_text("import sys\n" + f"sys.path.insert(0, {str(Path(__file__).resolve().parent.parent)!r})\n" +
+                          "from stack_review.cli import main\nmain()\n")
+        invocation = shlex.join([sys.executable, str(target.resolve() / "runner.py")])
+        (temporary / "runner.md").write_text(
+            "# Installed runner\n\nUse this exact command for RUNNER in workflow.md. No PATH change is needed.\n\n```sh\n" +
+            invocation + "\n```\n\nAppend the subcommand and arguments, e.g. `project inspect --checkout <project>`.\n")
         temporary.rename(target)
     finally:
         if temporary.exists():
@@ -38,6 +46,18 @@ def parser():
     ap = argparse.ArgumentParser(description="Portable PR stack review (Python 3.10+, Git, optional gh)")
     ap.add_argument("--home", type=Path, default=home(), help="Private runtime data directory")
     sp = ap.add_subparsers(dest="command", required=True)
+    project = sp.add_parser("project", help="Agent-guided project onboarding; users do not edit JSON")
+    ps = project.add_subparsers(dest="project_action", required=True)
+    for name in ("inspect", "configure"):
+        p = ps.add_parser(name)
+        p.add_argument("--checkout", type=Path, default=Path.cwd())
+        if name == "configure":
+            p.add_argument("--repository")
+            p.add_argument("--remote")
+            p.add_argument("--check", action="append", help="Quoted command; parsed as argv, never a shell expression")
+            p.add_argument("--setup", action="append")
+            p.add_argument("--context", action="append")
+            p.add_argument("--replace", action="store_true", help="Explicitly revise saved project preferences")
     init = sp.add_parser("init", help="Write a settings proposal; no Git or live-agent changes")
     init.add_argument("--settings", required=True, type=Path)
     init.add_argument("--checkout", required=True, type=Path)
@@ -48,7 +68,8 @@ def parser():
     install.add_argument("--host", choices=("hermes", "claude"), required=True)
     install.add_argument("--destination", type=Path)
     start = sp.add_parser("start")
-    start.add_argument("--settings", required=True, type=Path)
+    start.add_argument("--settings", type=Path, help="Advanced: override saved project settings")
+    start.add_argument("--checkout", type=Path, default=Path.cwd())
     group = start.add_mutually_exclusive_group(required=True)
     group.add_argument("--pr", type=int, help="Discover the entire stack containing this PR")
     group.add_argument("--manifest", type=Path, help="Explicit PR array, bottom to top (offline discovery)")
@@ -70,6 +91,11 @@ def parser():
 
 
 def dispatch(a):
+    if a.command == "project":
+        from . import onboarding
+        if a.project_action == "inspect":
+            return onboarding.inspect(a.home, a.checkout)
+        return onboarding.configure(a.home, a.checkout, a.repository, a.remote, a.check, a.setup, a.context, a.replace)
     if a.command == "init":
         if a.settings.exists():
             raise Error("Settings already exist; refusing to overwrite")
@@ -89,7 +115,11 @@ def dispatch(a):
     if a.command == "install-skill":
         return install_skill(a.host, a.destination)
     if a.command == "start":
-        return {"run": create(a.home, a.settings, a.pr, a.manifest)}
+        from .onboarding import project_path
+        config = a.settings or project_path(a.home, a.checkout)
+        if not config.is_file():
+            raise Error("This project is not configured yet. Use project inspect, then project configure; the agent handles these steps")
+        return {"run": create(a.home, config, a.pr, a.manifest)}
     if a.command == "list":
         rows = []
         for path in sorted((a.home / "runs").glob("*/run.json")):

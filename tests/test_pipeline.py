@@ -15,6 +15,7 @@ from unittest.mock import patch
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from stack_review import core
 from stack_review.cli import dispatch, install_skill, parser
+from stack_review import onboarding
 
 
 class PipelineTests(unittest.TestCase):
@@ -422,8 +423,70 @@ class PipelineTests(unittest.TestCase):
         self.assertFalse(sentinel.exists())
         self.assertFalse(self.home.exists())
 
+    def test_project_discovery_never_executes_manifest_scripts_or_writes_settings(self):
+        sentinel = self.root / "never-run"
+        core.atomic_json(self.source / "package.json", {"scripts": {"test": f"touch {sentinel}", "deploy": "do not run"}})
+        (self.source / "pnpm-lock.yaml").write_text("lockfileVersion: 9\n")
+        (self.source / "AGENTS.md").write_text("Read project rules before running tests.\n")
+        observed = onboarding.inspect(self.home, self.source)
+        self.assertEqual(observed["proposal"]["checks"][0]["argv"], ["pnpm", "run", "test"])
+        self.assertEqual(observed["proposal"]["context_files"], ["AGENTS.md"])
+        self.assertFalse(sentinel.exists())
+        self.assertFalse(self.home.exists())
+        self.assertNotIn(str(sentinel), core.canonical(observed))
+
+    def test_guided_configuration_and_start_need_no_settings_argument(self):
+        tests = self.source / "tests"
+        tests.mkdir()
+        (tests / "test_example.py").write_text("import unittest\n")
+        result = onboarding.configure(self.home, self.source, repository="test/project")
+        self.assertFalse(result["reused"])
+        path = Path(result["settings"])
+        self.assertTrue(path.is_relative_to(self.home.resolve()))
+        self.assertFalse(path.is_relative_to(self.source.resolve()))
+        cfg = core.settings(path)
+        self.assertEqual(cfg["checks"][0]["argv"], ["python3", "-m", "unittest", "discover", "-s", "tests"])
+        (self.source / "subdir").mkdir()
+        again = onboarding.configure(self.home, self.source / "subdir", checks=["should not replace saved settings"])
+        self.assertTrue(again["reused"])
+        self.assertEqual(core.settings(path), cfg)
+        args = parser().parse_args(["--home", str(self.home), "start", "--checkout", str(self.source), "--manifest", str(self.manifest)])
+        result = dispatch(args)
+        self.assertEqual(core.Run(self.home, result["run"]).cfg["checks"], cfg["checks"])
+
+    def test_configure_overrides_and_saved_preferences_are_preserved(self):
+        marker = self.root / "setup-never-run"
+        result = onboarding.configure(self.home, self.source, repository="test/project", checks=["python3 -m unittest"],
+                                      setup=[f"python3 -c {repr('print(123)')}"], contexts=["AGENTS.md"])
+        first = core.settings(result["settings"])
+        onboarding.configure(self.home, self.source, checks=['python3 -c "print(456)"'], replace=True)
+        changed = core.settings(result["settings"])
+        self.assertEqual(changed["setup_commands"], first["setup_commands"])
+        self.assertEqual(changed["context_files"], ["AGENTS.md"])
+        self.assertEqual(changed["checks"][0]["argv"], ["python3", "-c", "print(456)"])
+        self.assertFalse(marker.exists())
+
+    def test_unknown_checks_and_ambiguous_remotes_require_agent_choice(self):
+        with self.assertRaisesRegex(core.Error, "infer the GitHub"):
+            onboarding.configure(self.home, self.source)
+        with self.assertRaisesRegex(core.Error, "No verification"):
+            onboarding.configure(self.home, self.source, repository="test/project")
+        self.assertFalse(self.home.exists())
+        self.g("remote", "rename", "origin", "upstream")
+        self.g("remote", "add", "fork", str(self.remote))
+        with self.assertRaisesRegex(core.Error, "remote"):
+            onboarding.configure(self.home, self.source, repository="test/project", checks=["python3 -m unittest"])
+        result = onboarding.configure(self.home, self.source, repository="test/project", remote="upstream", checks=["python3 -m unittest"])
+        self.assertEqual(core.settings(result["settings"])["remote"], "upstream")
+
 
 class ContractTests(unittest.TestCase):
+    def test_github_remote_detection_never_returns_credentials(self):
+        for url in ("git@github.com:someone/project.git", "https://github.com/someone/project.git",
+                    "https://placeholder-token@github.com/someone/project.git", "ssh://git@github.com/someone/project.git"):
+            self.assertEqual(onboarding.repository_name(url), "someone/project")
+        self.assertIsNone(onboarding.repository_name("/local/remote.git"))
+
     def test_forks_cycles_and_non_contiguous_manifests_rejected(self):
         def pr(n, head, base):
             return {"number": n, "headRefName": head, "baseRefName": base}
@@ -456,6 +519,11 @@ class ContractTests(unittest.TestCase):
                 install_skill(host, target)
                 self.assertTrue((target / "workflow.md").is_file())
                 self.assertIn("name: stack-review", (target / "SKILL.md").read_text())
+                self.assertTrue((target / "runner.md").is_file())
+                self.assertTrue((target / "runner.py").is_file())
+                env = {**os.environ, "PATH": ""}
+                result = subprocess.run([sys.executable, str(target / "runner.py"), "--help"], env=env, capture_output=True, text=True)
+                self.assertEqual(result.returncode, 0, result.stderr)
                 with self.assertRaises(core.Error):
                     install_skill(host, target)
 
@@ -469,6 +537,29 @@ class ContractTests(unittest.TestCase):
             result = subprocess.run([str(root / "tool/bin/stack-review"), "--help"], capture_output=True, text=True)
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertIn("record-review", result.stdout)
+
+    def test_installer_supports_both_hosts_without_path_configuration(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            package = Path(__file__).resolve().parents[1]
+            env = {**os.environ, "HOME": str(root), "HERMES_HOME": str(root / ".hermes")}
+            result = subprocess.run([sys.executable, str(package / "install.py"), "--prefix", str(root / "tool"),
+                                     "--host", "both"], env=env, capture_output=True, text=True)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            for host in (".hermes", ".claude"):
+                runner = root / host / "skills/stack-review/runner.py"
+                result = subprocess.run([sys.executable, str(runner), "--help"], env={**env, "PATH": ""}, capture_output=True, text=True)
+                self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_install_without_flags_only_asks_which_host(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            package = Path(__file__).resolve().parents[1]
+            env = {**os.environ, "HOME": str(root), "HERMES_HOME": str(root / ".hermes")}
+            result = subprocess.run([sys.executable, str(package / "install.py")], input="2\n", env=env, capture_output=True, text=True)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertTrue((root / ".claude/skills/stack-review/runner.py").is_file())
+            self.assertFalse((root / ".hermes").exists())
 
     def test_install_conflict_does_not_leave_a_new_prefix(self):
         with tempfile.TemporaryDirectory() as temporary:

@@ -3,8 +3,11 @@ name: stack-review
 description: Review and fix a chain of dependent GitHub PRs using isolated, resumable runs. Prepare a publication plan and publish only after user approval.
 ---
 
-Use the installed `stack-review` command. If it is missing, ask the user to run
-the package's install.py; do not install a different tool with the same name.
+User interface: `/stack-review 123` (or a PR URL). The user supplies the PR and
+the main session handles ALL runner commands, first-use setup and review phases.
+Never hand the command sequence or JSON editing back to the user.
+Read [runner.md](runner.md) for the installed runner's exact command; PATH is not
+required. If this file/runner is missing, report an incomplete installation.
 Read [workflow.md](workflow.md) for the shared workflow and artifact contract.
 
 Keep orchestration in the main conversation so the user can inspect and approve

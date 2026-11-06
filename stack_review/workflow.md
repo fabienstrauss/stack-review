@@ -9,17 +9,50 @@ configuration, not repository-discovered scripts.
 
 ## Begin or resume
 
-Use a user-selected settings file. If none exists, propose one with
-`stack-review init --settings <path> --checkout <path> --repository owner/repo`.
-Configure context_files, standing_decisions and meaningful checks before starting.
-Never copy personal settings, tokens, private project notes or run artifacts into
-the distributed package. `doctor --settings <path>` is read-only inspection.
+The user says `/stack-review 123` or gives a PR URL; YOU run the commands below.
+Read runner.md for the exact installed invocation (called RUNNER here). No PATH
+setup is needed. The agent's terminal workdir is the user's selected checkout.
+Extract the PR number from the request; for a URL verify its owner/repo against
+the selected checkout. Ask which checkout only if the session/URL does not resolve
+it unambiguously. No PR supplied: ask for the PR number, not CLI details.
 
-`stack-review start --settings <path> --pr N` discovers the ENTIRE containing stack,
+Run `RUNNER project inspect --checkout <checkout>`. This reads Git metadata,
+instruction filenames and known manifest/test metadata, runs no project scripts,
+and saves nothing. If configured, reuse its saved settings and continue.
+On first use, read the applicable project instructions, candidate script definitions,
+and CI guidance. Detected test commands are suggestions, not proven suitable checks:
+avoid watch modes, interactive jobs, deployment commands and prohibited typechecks.
+Choose a meaningful allowed verification command, dependency setup if needed, and
+canonical project notes. The runner deliberately does not infer dependency installs.
+
+Tell the user in plain language what you found and what checks will run. Make
+routine choices yourself from evidence and existing authorization; ask a short
+question only about an unresolved choice (e.g. tests requiring a live database).
+Do not ask users to understand or edit configuration. Write it yourself using
+`RUNNER project configure --checkout <checkout>` after checking the detected
+defaults, or pass `--check 'command args'` (repeat for multiple checks),
+`--setup 'command args'`, `--context <file>`, `--repository owner/repo`, `--remote name`
+as needed. Command strings become argv arrays; shell operators are not evaluated.
+For complex settings beyond these options the agent may write the JSON itself
+and validate it with doctor; never make that a user prerequisite. Saved settings
+live outside the project and apply to this checkout. Configuration never runs checks.
+
+If no reliable check can be inferred, ask one plain-language question before
+saving. Do not silently allow skips. If the user later requests a preference
+change, inspect existing settings and use configure --replace with the desired
+overrides (or edit and validate them yourself). Never change unrelated preferences.
+Never copy personal settings, credentials, private notes or run artifacts into the
+distributed package. Explicit --settings remains an advanced escape hatch.
+
+`RUNNER start --checkout <checkout> --pr N` reuses saved project settings and discovers the ENTIRE containing stack,
 including PRs below and above N. Tell the user that scope. Retain its returned run
 ID explicitly in every subsequent command; there is no implicit current run.
 `stack-review list` and `status --run ID` find/resume runs. Always specify the same
 `--home <path>` global option if using a custom runtime root.
+
+In the rest of this document, replace `stack-review` with RUNNER from runner.md.
+Execute these steps autonomously with progress updates. The normal user interaction
+is a PR number followed by a final approval report, not a sequence of CLI instructions.
 
 ## Review and fix
 

@@ -6,7 +6,7 @@ Git operations, artifacts, verification and publication gates.
 
 This directory is self-contained: copy it into a separate repository to distribute
 it. It contains no personal paths, credentials, project notes or live settings.
-No nested Git repository or remote is created here. Version 0.1 is a tested local
+No nested Git repository or remote is created here. Version 0.2 is a tested local
 implementation; host discovery and a real GitHub publication still need a pilot.
 
 ## Install
@@ -17,44 +17,86 @@ updates also require the GitHub CLI (`gh auth login`). No Python runtime depende
 From a copy of this directory:
 
 ```sh
-python3 install.py --host hermes
-# Or:
-python3 install.py --host claude
-export PATH="$HOME/.local/opt/stack-review/bin:$PATH"
+python3 install.py
 ```
 
-The installer copies the runner under `~/.local/opt/stack-review` and installs
-`stack-review` under the chosen host's personal skills directory. It refuses an
-existing prefix or skill rather than overwriting one. It never replaces your old
-`pr-stack-review` skill. To install the second adapter after the first:
+It detects a single installed host, or asks **Hermes, Claude Code, or both?**
+Then open a fresh session in your project and say:
 
-```sh
-stack-review install-skill --host claude
+```text
+/stack-review 123
 ```
 
-Use `--prefix /custom/path` and `--skills-dir /exact/skill/destination` with
-install.py for custom locations. An alternative is `python3 -m pip install .`
-followed by `stack-review install-skill --host hermes` (or `claude`). Pip packaging
-uses setuptools; the standalone installer needs only Python's standard library.
-Start a fresh host session and invoke **`/stack-review`**. Installation on disk
-does not prove the host loaded the skill. Both adapters require `stack-review`
-on the host process's PATH.
+The agent handles setup, review, fixes, verification and the final approval report.
+You do not run the pipeline commands, edit JSON, or change PATH. You can also give
+a PR URL. `123` selects its entire containing stack, including PRs above and below.
+
+The installer copies the runner under `~/.local/opt/stack-review` and installs the
+skill under the chosen host's personal skills directory. Each installed skill
+records its own runner invocation, so it works even if `stack-review` is not on
+PATH. Installation on disk does not prove the host loaded the skill; a fresh
+session is the discovery check. Existing prefixes/skills are preserved, including
+the original `pr-stack-review` skill; the installer refuses to overwrite them.
+
+## First review in a project
+
+The agent inspects the checkout, GitHub remote, project instructions and likely
+test commands. It reads the relevant project rules and chooses suitable checks.
+If something cannot be inferred safely, it asks in plain language—for example,
+whether tests need a database. It writes and reuses the settings for you under
+`~/.local/share/stack-review/projects/`, outside your repository.
+
+Typical interaction:
+
+```text
+You: /stack-review 123
+Agent: I found this project's instructions and pnpm tests. I'll use those checks
+       and remember the setup for future reviews.
+       [Reviews, independently evaluates fixes, restacks and verifies.]
+Agent: Here are the fixes, remaining decisions and exact publication plan.
+You: Go ahead.
+```
+
+Later, say “use the integration tests for this project” or “also load these project
+notes” and the agent updates the saved preferences. You do not need to know the
+settings schema. Discovery only reads allowlisted metadata; it never runs detected
+scripts. Checks and dependency setup run only during the actual review workflow.
+
+## Advanced configuration and runner commands
+
+The sections below document the machinery for contributors and debugging. Normal
+use remains `/stack-review <PR number>`; the agent executes these commands.
+
+For unattended installation, choose `python3 install.py --host hermes`,
+`--host claude` or `--host both`. `--prefix /custom/path` changes the installation
+location; `--skills-dir /exact/destination` is available for one host at a time.
+An alternative is `python3 -m pip install .` followed by
+`stack-review install-skill --host hermes` (or `claude`). Pip packaging uses
+setuptools; the standalone installer needs only Python's standard library.
 
 For development without installation: `python3 -m stack_review --help`.
+Installed skills use the exact command in their generated runner.md in place of
+`stack-review` below. A console command on PATH is optional for manual CLI use.
 
-## Configure a project
-
-Keep settings outside this distributable directory (or in ignored `local/`).
+The agent's onboarding commands are:
 
 ```sh
-stack-review init --settings /path/to/settings.json \
-  --checkout /path/to/checkout --repository owner/repo
-stack-review doctor --settings /path/to/settings.json
+stack-review project inspect --checkout /path/to/checkout
+stack-review project configure --checkout /path/to/checkout
+stack-review start --checkout /path/to/checkout --pr 123
 ```
 
-Edit the generated settings to add meaningful checks. See
-[examples/settings.json](examples/settings.json). The example is for a Python
-project; replace the checks with commands appropriate to your project.
+`inspect` returns observed metadata and a proposed configuration without saving
+or executing scripts. `configure` saves validated preferences. `--check 'pnpm run
+test:ci'`, `--setup 'pnpm install --frozen-lockfile'`, `--context /path/to/notes`,
+`--repository owner/repo` and `--remote upstream` override detected defaults.
+Repeated `--check` or `--setup` adds commands. `--replace` explicitly revises an
+existing configuration while retaining preferences not overridden.
+
+For custom or automated integrations, `init --settings <file> --checkout <path>
+--repository owner/repo` and `start --settings <file> --pr N` still work. The schema
+is illustrated in [examples/settings.json](examples/settings.json). The example
+uses Python tests; it is not a universal default.
 
 | Setting | Meaning |
 | --- | --- |
@@ -76,13 +118,13 @@ inside an argument; a standalone `{files}` expands to root-relative changed path
 Use `cwd: "."` with `{files}`. Put `--` before `{files}` where the target tool
 accepts it. Setup/check commands are trusted executable configuration: review
 settings before using someone else's file. No scripts are auto-discovered or run
-by init, list, status or doctor. Project rules still govern permitted commands.
+by project inspect/configure, init, list, status or doctor. Project rules still govern permitted commands.
 
 Dependencies and generated code are prepared explicitly in each run. Nothing
 links back to the original checkout. Agent preferences are requests to the host;
 the runner neither invokes a model nor proves which model was used.
 
-## Run
+### Runner lifecycle (handled by the agent)
 
 ```sh
 stack-review start --settings /path/to/settings.json --pr 101
@@ -151,7 +193,7 @@ The approval record enforces workflow ordering; it cannot authenticate that a
 human authorized it. The agent must respect user authorization. It is not a
 sandbox against an agent that can run arbitrary Git commands.
 
-## Scope of version 0.1
+## Scope of version 0.2
 
 Supports linear, same-repository branch stacks, full reviews, independent fix
 evaluation, per-head verification, conflict continuation and gated publication.
@@ -178,7 +220,7 @@ stay outside it. To build a source zip containing only explicitly allowlisted fi
 python3 package.py
 ```
 
-Share `dist/stack-review-0.1.0.zip`; recipients unpack it and run install.py. The
+Share `dist/stack-review-0.2.0.zip`; recipients unpack it and run install.py. The
 archive includes the tests and both adapters, with no installed dependencies.
 Publishing the containing personal-setup repository remains an
 explicit action and requires private visibility. This implementation does not

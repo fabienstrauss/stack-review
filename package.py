@@ -9,6 +9,7 @@ FILES = (
     "examples/manifest.json", "examples/settings.json",
     "stack_review/__init__.py", "stack_review/__main__.py",
     "stack_review/core.py", "stack_review/cli.py", "stack_review/workflow.md",
+    "stack_review/onboarding.py",
     "stack_review/skills/hermes/SKILL.md", "stack_review/skills/claude/SKILL.md",
     "tests/test_pipeline.py",
 )
@@ -33,6 +34,6 @@ def build(output):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--output", type=Path, default=Path("dist/stack-review-0.1.0.zip"))
+    parser.add_argument("--output", type=Path, default=Path("dist/stack-review-0.2.0.zip"))
     args = parser.parse_args()
     print(build(args.output))
