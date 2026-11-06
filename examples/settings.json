@@ -17,6 +17,13 @@
   "forbidden_paths": ["node_modules/**", "**/node_modules/**", ".env", ".env.*"],
   "ownership_policy": "stack",
   "specialist_skills": [],
+  "max_repair_rounds": 3,
+  "ci": {
+    "enabled": true,
+    "poll_interval": 30,
+    "timeout": 1800,
+    "expected_checks": []
+  },
   "allow_skip_checks": false,
   "agents": {
     "reviewer_model": "sonnet",

@@ -6,7 +6,7 @@ Git operations, artifacts, verification and publication gates.
 
 This directory is self-contained: copy it into a separate repository to distribute
 it. It contains no personal paths, credentials, project notes or live settings.
-No nested Git repository or remote is created here. Version 0.3 is a tested local
+No nested Git repository or remote is created here. Version 0.4 is a tested local
 implementation; host discovery and a real GitHub publication still need a pilot.
 
 ## Install
@@ -100,6 +100,59 @@ Project-local commands may need dependency setup before they can be checked.
 Changed manifests, lockfiles, project instructions, CI files or specialist guidance
 flag saved settings for the agent to revalidate. It preserves deliberate preferences.
 
+## Repair without starting over
+
+When verification exposes a real regression, the agent repairs it in the same run:
+
+1. Preserve completed reviews and checkpoint the current revision.
+2. Make a focused fix and have a fresh agent independently review just that patch.
+3. Carry the fix up the stack using scripts, preserving any conflict for resolution.
+4. Rerun checks on changed heads; reuse successful checks for exact unchanged heads.
+5. Present a new publication plan and obtain the required authorization before pushing.
+
+Each revision keeps its previous evidence. Old approval cannot silently authorize
+changed commits. Repairs default to at most three rounds, with bounded patch-review
+attempts. A moved remote branch or changed root base still needs a fresh run to
+review that new context. Unselected PRs require authorization before expanding scope.
+
+## CI follow-up without an agent waiting
+
+After pushing, the agent starts a small background Python watcher and returns
+control to you. It polls GitHub every 30 seconds for up to 30 minutes by default.
+Waiting does not use model calls or keep an agent sleep loop active.
+
+The watcher records exact published heads, check results and what should happen
+next in `ci/FOLLOWUP.md` inside the private run directory. It stops on failure,
+success, timeout, superseded heads or a condition needing attention. Passing checks
+get a second stable observation before success, allowing delayed checks to appear.
+Known expected check names can be configured to avoid treating missing jobs as green.
+Results describe observed checks, not a guarantee about future jobs.
+
+Later, simply say:
+
+```text
+/stack-review ci 123
+# Or: check CI for PR 123
+```
+
+The agent finds the existing run. A code regression leads to the repair flow;
+transient infrastructure failures get a diagnosis and bounded-rerun recommendation;
+missing secrets, permissions, deployment approvals and product choices need you.
+The runner downloads failed GitHub Actions logs only after checking their commit.
+It does not blindly rerun workflows, merge PRs or trigger deployments. External
+providers are observed through checks they report to GitHub; separate CD systems
+without those checks are not independently monitored.
+
+**The background watcher does not automatically wake Hermes or Claude.** A host
+with scheduling support can arrange a follow-up turn; otherwise, the result waits
+for your next interaction. The computer must remain available for the local
+watcher to run. Checkpoints survive interruptions; a fresh check/watch can resume.
+Never describe a pending, missing, all-skipped, cancelled or unavailable check as green.
+
+CI policy is configured conversationally too: “check every minute,” “allow 20
+minutes,” “expect lint and unit tests,” or “disable CI follow-up for this project.”
+These saved preferences apply to future runs; active runs keep their frozen policy.
+
 ## Update, roll back or uninstall
 
 From your clone of this repository:
@@ -131,6 +184,8 @@ run data and backups; it does not alter shell profiles or other skills.
 | `install.py`, `installation.py` | Install/update, integrity checks, backup, rollback, uninstall |
 | `onboarding.py`, `preflight.py` | Project discovery, saved preferences, drift and prerequisite checks |
 | `reviews.py` | Review reuse, delta comparisons, specialist snapshots, accepted baselines |
+| `repair.py` | Revision checkpoints, repair validation, independent patch-review gates and propagation into upper PRs |
+| `ci.py`, `ci_worker.py` | One-shot CI checks, bounded background polling, failed-log retrieval and persistent agent handoffs |
 | `core.py` | PR discovery, frozen clones, worktrees, ownership audits, rebasing/restacking, check execution, summaries, approval and lease-protected atomic pushes |
 | `cli.py` | Short machine-readable phase/status commands for either host |
 | `package.py` | Build a source archive from an explicit allowlist |
@@ -179,6 +234,8 @@ Repeated `--check` or `--setup` adds commands. `--replace` explicitly revises an
 existing configuration while retaining preferences not overridden.
 `--skill 'name=/path'` adds optional specialist guidance; `--require-skill` makes
 it mandatory. These replace the saved specialist list when explicitly supplied.
+`--ci`/`--no-ci`, `--ci-interval`, `--ci-timeout`, `--expected-check` and
+`--repair-limit` set CI and repair preferences without editing JSON.
 
 For custom or automated integrations, `init --settings <file> --checkout <path>
 --repository owner/repo` and `start --settings <file> --pr N` still work. The schema
@@ -200,6 +257,8 @@ uses Python tests; it is not a universal default.
 | `allow_skip_checks` | Permit explicit verification skips with a recorded reason; default false |
 | `agents` | Reviewer/fixer model and effort preferences, interpreted by the host adapter |
 | `specialist_skills` | Optional/required `{name, path, required}` references; none required by default |
+| `max_repair_rounds` | Bounded repair/patch-review attempts, default 3 |
+| `ci` | Enabled by default; poll_interval 30s, timeout 1800s, expected_checks names (optional) |
 
 Commands use argument arrays, never shell interpolation. `{worktree}` expands
 inside an argument; a standalone `{files}` expands to root-relative changed paths.
@@ -257,14 +316,15 @@ keep it out of shared Git repositories and unencrypted shared folders.
   inherit hidden hook execution or old conflict resolutions from the source.
 - Verification runs after integration, on every final head. Missing commands,
   timeouts and nonzero exits block publication. An explicit allowed skip is visible
-  in the approval plan. Checks that dirty tracked/untracked files block completion.
+  in the approval plan. During repair, successful checks on identical heads can
+  be reused and are labeled as such. Checks that dirty tracked/untracked files block completion.
 - Findings and verdicts are validated. Every finding has exactly one verdict and
   every new fix commit must be represented by a FIX verdict. Ownership uses
   per-file line coordinates and blame, not a global set of matching line text.
 - Plan digests include exact heads, verification, bodies, findings and verdicts.
   Changing the proposed description invalidates approval. Moving a final local
-  head or editing recorded findings/verdicts is refused; create a new run to
-  incorporate new fixes after restack.
+  head outside a recorded repair or editing original findings/verdicts is refused.
+  The repair flow retains review evidence and requires a fresh exact publication plan.
 - All branch updates use one atomic push with exact remote leases. A server that
   does not support atomic push fails; there is no unsafe sequential fallback.
 - A moved root base blocks publication at preflight. The base itself is not
@@ -284,12 +344,16 @@ The approval record enforces workflow ordering; it cannot authenticate that a
 human authorized it. The agent must respect user authorization. It is not a
 sandbox against an agent that can run arbitrary Git commands.
 
-## Scope of version 0.3
+## Scope of version 0.4
 
 Supports linear, same-repository branch stacks, single/from/whole-stack selection,
 full/delta/cached reviews, review-only reports, inline-feedback evaluation, specialist
 guidance, independent fix evaluation, per-head verification, conflict continuation,
 safe resume discovery, managed installation lifecycle and gated publication.
+Also includes controlled repairs without restarting, independent repair-patch
+reviews, reusable unchanged-head checks, bounded background CI observations and
+failed-log handoffs. Automatic host wake-up, workflow reruns, merging and deployment
+are not implemented by the background worker.
 Ambiguous forks, cyclic stacks and PR histories with merge commits are rejected;
 the runner does not silently flatten merge resolutions. It intentionally omits automatic
 working-branch integration, board changes, comment publication, merge automation
@@ -314,7 +378,7 @@ stay outside it. To build a source zip containing only explicitly allowlisted fi
 python3 package.py
 ```
 
-Share `dist/stack-review-0.3.0.zip`; recipients unpack it and run install.py. The
+Share `dist/stack-review-0.4.0.zip`; recipients unpack it and run install.py. The
 archive includes the tests and both adapters, with no installed dependencies.
 Publishing the containing personal-setup repository remains an
 explicit action and requires private visibility. This implementation does not

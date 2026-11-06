@@ -110,7 +110,8 @@ def inspect(home, checkout):
 
 
 def configure(home, checkout, repository=None, remote=None, checks=None, setup=None, contexts=None, replace=False,
-              optional_skills=None, required_skills=None):
+              optional_skills=None, required_skills=None, ci_enabled=None, ci_interval=None, ci_timeout=None,
+              expected_checks=None, repair_limit=None):
     observed = inspect(home, checkout)
     path = Path(observed["settings_path"])
     if observed["configured"] and not replace:
@@ -130,6 +131,12 @@ def configure(home, checkout, repository=None, remote=None, checks=None, setup=N
             cfg[key] = [{"name": f"{key}-{i + 1}", "argv": shlex.split(value), "cwd": "."} for i, value in enumerate(values)]
     if contexts is not None:
         cfg["context_files"] = contexts
+    cfg["ci"] = dict(cfg["ci"])
+    for key, value in (("enabled", ci_enabled), ("poll_interval", ci_interval), ("timeout", ci_timeout), ("expected_checks", expected_checks)):
+        if value is not None:
+            cfg["ci"][key] = value
+    if repair_limit is not None:
+        cfg["max_repair_rounds"] = repair_limit
     if optional_skills is not None or required_skills is not None:
         specs = []
         for required, values in ((False, optional_skills or []), (True, required_skills or [])):

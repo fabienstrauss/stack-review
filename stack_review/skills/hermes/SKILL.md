@@ -22,3 +22,7 @@ Honor single-PR/from/again/review-only requests through the selection table in
 workflow.md. Verify delegation capability in preflight; do not claim it from an
 installed skill file alone. Routine Git plumbing belongs to the runner; inspect
 and resolve code only when a review/fix or actual conflict needs judgment.
+Verification/CI repairs keep the run and get an independent patch review; follow
+the repair section rather than restarting. After push, launch ci watch and return
+control to the user. The watcher checkpoints status; automatic agent wake-up needs
+an actual host scheduler and must not be promised merely because a worker started.

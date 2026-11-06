@@ -1,5 +1,6 @@
 """Host-independent run engine. No model SDK, shared checkout mutation or shell interpolation."""
 from contextlib import contextmanager
+from copy import deepcopy
 from datetime import datetime, timezone
 import fnmatch
 import hashlib
@@ -88,6 +89,8 @@ DEFAULTS = {
     "standing_decisions": [], "allow_skip_checks": False,
     "ownership_policy": "stack",
     "specialist_skills": [],
+    "max_repair_rounds": 3,
+    "ci": {"enabled": True, "poll_interval": 30, "timeout": 1800, "expected_checks": []},
     "agents": {"reviewer_model": "sonnet", "fixer_model": "sonnet", "effort": "high"},
 }
 
@@ -99,9 +102,17 @@ def settings(path):
     unknown = set(supplied) - set(DEFAULTS) - {"checkout", "repository"}
     if unknown:
         raise Error(f"Unknown settings: {sorted(unknown)}")
-    cfg = {**DEFAULTS, **supplied}
+    cfg = {**deepcopy(DEFAULTS), **supplied}
     if cfg["schema_version"] != 1:
         raise Error("Unsupported settings schema_version")
+    if type(cfg["max_repair_rounds"]) is not int or not 1 <= cfg["max_repair_rounds"] <= 20:
+        raise Error("max_repair_rounds must be between 1 and 20")
+    ci = cfg["ci"]
+    if (not isinstance(ci, dict) or set(ci) != {"enabled", "poll_interval", "timeout", "expected_checks"}
+            or type(ci["enabled"]) is not bool or type(ci["poll_interval"]) is not int or not 1 <= ci["poll_interval"] <= 300
+            or type(ci["timeout"]) is not int or not ci["poll_interval"] <= ci["timeout"] <= 86400
+            or not isinstance(ci["expected_checks"], list) or any(not isinstance(n, str) or not n for n in ci["expected_checks"])):
+        raise Error("ci requires enabled, poll_interval (1..300), timeout (interval..86400), expected_checks strings")
     for key in ("checkout", "repository", "remote"):
         if not isinstance(cfg.get(key), str) or not cfg[key] or cfg[key].startswith("-"):
             raise Error(f"{key} must be a nonempty string, not an option")
@@ -274,6 +285,7 @@ def create(root, config_path, number=None, manifest=None, scope="stack", again=F
                          "prs": [{k: p.get(k, "") for k in ("number", "title", "headRefName", "baseRefName")} for p in prs]})
     if resume or resume_run:
         candidates = []
+        ci_followups = []
         for file in (Path(root) / "runs").glob("*/run.json"):
             try:
                 previous = read_json(file)
@@ -294,6 +306,10 @@ def create(root, config_path, number=None, manifest=None, scope="stack", again=F
                     matching = matching and current.get("body", "") in bodies
             if (matching and previous.get("phase") not in ("initializing", "published", "reported") and not previous.get("pushed")):
                 candidates.append(previous["id"])
+            if (matching and previous.get("pushed") and previous["config"].get("ci", DEFAULTS["ci"])["enabled"]
+                    and previous.get("ci", {}).get("state") != "passed"
+                    and all(observed_heads.get(f"refs/heads/{p['head']}") == p.get("new") for p in previous["prs"])):
+                ci_followups.append(previous["id"])
         if resume_run:
             if resume_run not in candidates:
                 raise Error("Requested run no longer matches remote heads, scope, rules or settings; start a new run")
@@ -301,6 +317,8 @@ def create(root, config_path, number=None, manifest=None, scope="stack", again=F
                 return resume_run
         if candidates:
             return {"resume_candidates": sorted(candidates), "next": "Confirm another session is not using this run, then start with --resume-run ID; --new-run keeps sessions independent"}
+        if ci_followups:
+            return {"ci_followups": sorted(ci_followups, reverse=True), "next": "Continue CI follow-up on the matching published revision; use --new-run for an independent review"}
     run_id = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ-") + uuid.uuid4().hex[:12]
     directory = Path(root).expanduser().resolve() / "runs" / run_id
     directory.mkdir(parents=True, mode=0o700)
@@ -440,12 +458,18 @@ class Run:
         return self.directory / "worktrees" / str(p["number"])
 
     def ready(self):
+        if self.state.get("active_repair"):
+            raise Error("Finish the active repair and its patch review before verification or publication")
         if self.state.get("review_only"):
             raise Error("Review-only runs cannot restack, verify fixes or publish")
         if not self.state.get("restacked") or any(p["phase"] != "done" for p in self.state["prs"]):
             raise Error("Complete all review/fix phases and restack first")
 
     def next(self):
+        if self.state.get("active_repair"):
+            repair = self.state["active_repair"]
+            return {"action": "repair-" + repair["stage"], "pr": repair["pr"],
+                    "directory": repair["directory"], "agents": self.cfg["agents"]}
         if self.state["phase"] == "initializing":
             return {"action": "blocked", "reason": "Initialization failed; inspect error and start a new run"}
         for p in self.state["prs"]:
@@ -459,6 +483,9 @@ class Run:
                             ("plan", "plan"), ("approval", "approve"), ("pushed", "push")):
             if not self.state.get(key):
                 return {"action": action}
+        if self.state.get("pushed") and self.cfg.get("ci", DEFAULTS["ci"])["enabled"]:
+            from .ci import next_action
+            return next_action(self)
         return {"action": "done"}
 
     def record_review(self, number):
@@ -538,7 +565,7 @@ Return verdict counts, fix commits and outstanding decisions.
                 else:
                     argv.append(arg.replace("{worktree}", str(worktree)))
             cwd = inside(worktree, spec.get("cwd", "."))
-            log = self.pr_dir(p) / f"{group}-{len(results)}.log"
+            log = self.pr_dir(p) / f"{group}-r{self.state.get('revision', 0)}-{len(results)}.log"
             try:
                 result = command(argv, cwd=cwd, timeout=self.cfg["command_timeout"], check=False)
                 log.write_text(result.stdout + "\n" + result.stderr)
@@ -594,6 +621,8 @@ Return verdict counts, fix commits and outstanding decisions.
             reviews.store(self.directory.parents[1], self.cfg, p, self.pr_dir(p), verdicts=verdicts)
 
     def restack(self, resume=False):
+        if self.state.get("active_repair"):
+            raise Error("Use repair restack for the active repair")
         if self.state.get("review_only"):
             raise Error("Review-only runs cannot restack")
         if any(p["phase"] != "done" for p in self.state["prs"]):
@@ -651,7 +680,7 @@ Return verdict counts, fix commits and outstanding decisions.
             worktree = self.worktree(p)
             self.clean(worktree)
             if git(worktree, "rev-parse", "HEAD") != p["new"]:
-                raise Error("Restacked worktree moved; start a fresh run to include additional commits")
+                raise Error("Restacked worktree moved outside a recorded repair; inspect it before continuing")
 
     def verify(self, skip_reason=None):
         self.ready()
@@ -668,8 +697,14 @@ Return verdict counts, fix commits and outstanding decisions.
             if not self.cfg["checks"]:
                 raise Error("Configure verification commands, or explicitly permit and explain skipping")
             results = []
+            reusable = self.state.get("reusable_verification", {})
             for p in self.state["prs"]:
-                results.append({"pr": p["number"], "checks": self.execute_commands(p, self.worktree(p), "checks")})
+                old = next((r for r in reusable.get("results", []) if r["pr"] == p["number"]), None)
+                if (old and reusable.get("heads", {}).get(str(p["number"])) == p["new"]
+                        and all(c["returncode"] == 0 for c in old["checks"])):
+                    results.append({**old, "reused": True})
+                else:
+                    results.append({"pr": p["number"], "checks": self.execute_commands(p, self.worktree(p), "checks")})
             verification = {"heads": self.heads(), "results": results}
             if any(c["returncode"] for r in results for c in r["checks"]):
                 self.state["failed_verification"] = verification
@@ -699,14 +734,16 @@ Return verdict counts, fix commits and outstanding decisions.
             body = body_file.read_text() if body_file.exists() else None
             if body is not None and not body.strip():
                 raise Error("Updated PR body cannot be empty")
-            prs.append({"number": p["number"], "branch": p["head"], "expected": p["original"],
-                        "new": p["new"], "body_before": p["body"], "body_after": body,
+            before = p.get("remote_body", p["body"])
+            prs.append({"number": p["number"], "branch": p["head"], "expected": p.get("lease", p["original"]),
+                        "new": p["new"], "body_before": before, "body_after": body if body != before else None,
                         "findings": p.get("findings", []), "verdicts": p.get("verdicts", []),
                         "ownership_audit": p.get("ownership_audit", []), "review": p.get("review", "full"),
                         "selected": p.get("selected", True)})
         return {"run": self.state["id"], "repository": self.cfg["repository"], "remote": self.state["remote"],
                 "base_branch": self.state["prs"][0]["base"], "base_sha": self.state["base_sha"],
                 "scope": self.state.get("scope", "stack"), "missing_optional_skills": self.state.get("specialists", {}).get("missing_optional", []),
+                "revision": self.state.get("revision", 0), "repairs": self.state.get("repairs", []),
                 "input_digest": self.state["input_digest"], "verification": verification, "prs": prs}
 
     def plan(self):
@@ -727,6 +764,12 @@ Return verdict counts, fix commits and outstanding decisions.
                 lines.append(f"\n- #{p['number']} {v['id']} **{v['verdict']}**: {v['reason']}")
             if p["ownership_audit"]:
                 lines.append(f"\n- #{p['number']}: {len(p['ownership_audit'])} base-line edits permitted by ownership_policy=report; inspect plan.json.")
+        for repair in plan["repairs"]:
+            lines.append(f"\n- Repair #{repair['round']} on PR #{repair['pr']}: {repair['reason']} ({len(repair['commits'])} commits; independently reviewed).")
+            if repair.get("scope_expanded"):
+                lines.append("  This repair expands the original review selection; verify that user authorization covers it.")
+            if repair.get("ownership_audit"):
+                lines.append(f"  {len(repair['ownership_audit'])} base-owned line edits explicitly allowed by ownership_policy=report; inspect repair evidence.")
         lines += ["", "## Verification", "", "```json", json.dumps(plan["verification"], indent=2), "```",
                   "", "## Publication", "", "All listed branches are included in one atomic push with exact leases.",
                   "Body updates follow the branch push and are journaled individually. No comments or board changes.",
@@ -800,10 +843,13 @@ Return verdict counts, fix commits and outstanding decisions.
             raise Error("Remote verification failed; inspect before retrying")
         self.state["pushed"] = True
         self.state["phase"] = "published"
+        for p in self.state["prs"]:
+            proposed = self.pr_dir(p) / "body.new.md"
+            p["remote_body"] = proposed.read_text() if proposed.exists() else p.get("remote_body", p["body"])
         self.save()
         from . import reviews
         reviews.remember_publication(self)
-        return {"published": self.state["id"], "digest": plan_id}
+        return {"published": self.state["id"], "digest": plan_id, "next": self.next()}
 
 
 def validate_findings(items):

@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "portable-stack-review"
-version = "0.3.0"
+version = "0.4.0"
 description = "Isolated, resumable PR stack reviews for Hermes and Claude Code"
 requires-python = ">=3.10"
 dependencies = []

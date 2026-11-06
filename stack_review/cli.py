@@ -61,6 +61,33 @@ def parser():
             p.add_argument("--replace", action="store_true", help="Explicitly revise saved project preferences")
             p.add_argument("--skill", action="append", help="Optional name=/path/to/skill")
             p.add_argument("--require-skill", action="append", help="Required name=/path/to/skill")
+            p.add_argument("--ci", dest="ci_enabled", action=argparse.BooleanOptionalAction, default=None)
+            p.add_argument("--ci-interval", type=int)
+            p.add_argument("--ci-timeout", type=int)
+            p.add_argument("--expected-check", action="append")
+            p.add_argument("--repair-limit", type=int)
+    repairs = sp.add_parser("repair", help="Repair verification/CI failures without repeating completed reviews")
+    rs = repairs.add_subparsers(dest="repair_action", required=True)
+    for name in ("begin", "record", "record-review", "restack", "cancel"):
+        p = rs.add_parser(name)
+        p.add_argument("--run", required=True)
+        if name == "begin":
+            p.add_argument("--pr", type=int, required=True)
+            p.add_argument("--reason", required=True)
+            p.add_argument("--include-unselected", action="store_true")
+        if name == "restack":
+            p.add_argument("--continue", dest="resume", action="store_true")
+    checks = sp.add_parser("ci", help="Nonblocking CI follow-up and a bounded background watcher")
+    cs = checks.add_subparsers(dest="ci_action", required=True)
+    for name in ("check", "status", "watch", "stop", "logs", "find"):
+        p = cs.add_parser(name)
+        if name == "find":
+            p.add_argument("--checkout", type=Path, default=Path.cwd())
+            p.add_argument("--pr", type=int, required=True)
+        else:
+            p.add_argument("--run", required=True)
+            if name == "logs":
+                p.add_argument("--pr", type=int, required=True)
     preflight = sp.add_parser("preflight", help="Check tools, GitHub access and specialist availability before work")
     preflight.add_argument("--settings", type=Path)
     preflight.add_argument("--checkout", type=Path, default=Path.cwd())
@@ -113,7 +140,10 @@ def dispatch(a):
         if a.project_action == "inspect":
             return onboarding.inspect(a.home, a.checkout)
         return onboarding.configure(a.home, a.checkout, a.repository, a.remote, a.check, a.setup, a.context, a.replace,
-                                    a.skill, a.require_skill)
+                                    a.skill, a.require_skill, a.ci_enabled, a.ci_interval, a.ci_timeout, a.expected_check, a.repair_limit)
+    if a.command == "ci" and a.ci_action == "find":
+        from .ci import find
+        return find(a.home, a.checkout, a.pr)
     if a.command == "preflight":
         from .onboarding import project_path, stale
         from .preflight import check
@@ -163,21 +193,40 @@ def dispatch(a):
             rows.append({"run": state["id"], "phase": state["phase"], "prs": [p["number"] for p in state["prs"]]})
         return rows
     # Lock before reading state to avoid stale writers. Read-only commands do not create files.
-    if a.command in ("status", "next"):
+    if a.command in ("status", "next") or a.command == "ci" and a.ci_action == "status":
         run = Run(a.home, a.run)
+        if a.command == "ci":
+            return {"ci": run.state.get("ci"), "next": run.next()}
         return run.next() if a.command == "next" else {
             "run": a.run, "phase": run.state["phase"], "next": run.next(),
             "prs": [{k: p.get(k) for k in ("number", "phase", "original", "new")} for p in run.state["prs"]],
             "directory": str(run.directory), "verification": run.state.get("verification"),
-            "failed_verification": run.state.get("failed_verification"), "publication": run.state.get("publication")}
+            "failed_verification": run.state.get("failed_verification"), "publication": run.state.get("publication"),
+            "repair": run.state.get("active_repair"), "revision": run.state.get("revision", 0), "ci": run.state.get("ci")}
     # Validate identity before choosing the lock path, but reload state under lock.
     run = Run(a.home, a.run)
     with lock(run.directory):
         run = Run(a.home, a.run)
+        if a.command == "repair":
+            from . import repair
+            if a.repair_action == "begin":
+                return repair.begin(run, a.pr, a.reason, a.include_unselected)
+            if a.repair_action == "record":
+                return repair.record(run)
+            if a.repair_action == "record-review":
+                return repair.record_review(run)
+            if a.repair_action == "restack":
+                return repair.restack(run, a.resume)
+            return repair.cancel(run)
+        if a.command == "ci":
+            from . import ci
+            if a.ci_action == "logs":
+                return ci.logs(run, a.pr)
+            return {"check": ci.check, "watch": ci.watch, "stop": ci.stop}[a.ci_action](run)
         if run.state.get("pushed"):
             if a.command == "push":
                 return run.push(a.dry_run)
-            raise Error("Published runs are immutable; start a fresh run")
+            raise Error("Published revisions are immutable; use the controlled repair flow for CI fixes")
         if a.command == "record-review":
             return run.record_review(a.pr)
         if a.command == "prepare-fix":

@@ -11,9 +11,10 @@ FILES = (
     "stack_review/core.py", "stack_review/cli.py", "stack_review/workflow.md",
     "stack_review/onboarding.py",
     "stack_review/reviews.py", "stack_review/preflight.py", "stack_review/installation.py",
+    "stack_review/repair.py", "stack_review/ci.py", "stack_review/ci_worker.py",
     "stack_review/legacy-v0.2.json",
     "stack_review/skills/hermes/SKILL.md", "stack_review/skills/claude/SKILL.md",
-    "tests/test_pipeline.py", "tests/test_features.py",
+    "tests/test_pipeline.py", "tests/test_features.py", "tests/test_repair_ci.py",
 )
 
 
@@ -36,6 +37,6 @@ def build(output):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--output", type=Path, default=Path("dist/stack-review-0.3.0.zip"))
+    parser.add_argument("--output", type=Path, default=Path("dist/stack-review-0.4.0.zip"))
     args = parser.parse_args()
     print(build(args.output))
